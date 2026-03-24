@@ -189,6 +189,17 @@ for (let oct = 6; oct >= 3; oct--) {
   }
 }
 
+// CSS grid background using repeating gradients instead of individual cell divs
+const getGridBackgroundImage = (stepsPerBar, stepsPerBeat) => {
+  const barWidth = stepsPerBar * 40;
+  const beatWidth = stepsPerBeat * 40;
+  return [
+    `repeating-linear-gradient(90deg, transparent, transparent ${barWidth - 1}px, #6b7280 ${barWidth - 1}px, #6b7280 ${barWidth}px)`,
+    `repeating-linear-gradient(90deg, transparent, transparent ${beatWidth - 1}px, #374151 ${beatWidth - 1}px, #374151 ${beatWidth}px)`,
+    `repeating-linear-gradient(90deg, transparent, transparent 39px, #1f2937 39px, #1f2937 40px)`
+  ].join(', ');
+};
+
 const getDurationLabel = (steps, stepsPerBar) => {
   if (steps === stepsPerBar) return '1 Bar';
   if (steps === stepsPerBar * 2) return '2 Bars';
@@ -269,6 +280,25 @@ export default function App() {
     return totalBars * stepsPerBar;
   }, [activeNotes, stepsPerBar]);
 
+  // Pre-compute notes grouped by row for efficient rendering
+  const notesByRow = useMemo(() => {
+    const map = {};
+    Object.entries(activeNotes).forEach(([key, duration]) => {
+      const lastDash = key.lastIndexOf('-');
+      const noteId = key.substring(0, lastDash);
+      const step = parseInt(key.substring(lastDash + 1), 10);
+      if (!map[noteId]) map[noteId] = [];
+      map[noteId].push({ step, duration, key });
+    });
+    return map;
+  }, [activeNotes]);
+
+  // CSS grid background image (computed once, not per-cell)
+  const gridBackgroundImage = useMemo(
+    () => getGridBackgroundImage(stepsPerBar, stepsPerBeat),
+    [stepsPerBar, stepsPerBeat]
+  );
+
   // Ensure visual playhead wraps properly
   const visualStep = currentStep % numSteps;
 
@@ -277,6 +307,8 @@ export default function App() {
   const masterGainRef = useRef(null);
   const gridRef = useRef(null);
   const fileInputRef = useRef(null);
+  const playheadRef = useRef(null);
+  const headerHighlightRef = useRef(null);
   
   // NEW REFS for Lookahead Scheduling
   const scheduleIntervalRef = useRef(null);
@@ -284,10 +316,10 @@ export default function App() {
   const currentAudioStepRef = useRef(0);
   
   // Keep mutable state in refs for the audio loop to avoid dependency cycle restarts
-  const stateRef = useRef({ activeNotes, waveform, volume, bpm, numSteps });
+  const stateRef = useRef({ activeNotes, waveform, volume, bpm, numSteps, stepsPerBeat });
   useEffect(() => {
-    stateRef.current = { activeNotes, waveform, volume, bpm, numSteps };
-  }, [activeNotes, waveform, volume, bpm, numSteps]);
+    stateRef.current = { activeNotes, waveform, volume, bpm, numSteps, stepsPerBeat };
+  }, [activeNotes, waveform, volume, bpm, numSteps, stepsPerBeat]);
 
   // --- LocalStorage Utilities ---
   const STORAGE_KEY = 'melody-maker-projects';
@@ -579,10 +611,21 @@ export default function App() {
             }
           });
 
-          // 2. Schedule UI Update (Sync playhead visually)
+          // 2. Schedule UI Update (Sync playhead visually via DOM refs)
           const timeUntilPlayMs = (timeToPlay - ctx.currentTime) * 1000;
+          const visualPos = stepToPlay % currentNumSteps;
+          const currentStepsPerBeat = stateRef.current.stepsPerBeat;
           setTimeout(() => {
-            setCurrentStep(stepToPlay);
+            if (playheadRef.current) {
+              playheadRef.current.style.left = `${visualPos * 40}px`;
+            }
+            if (headerHighlightRef.current) {
+              headerHighlightRef.current.style.left = `${visualPos * 40}px`;
+            }
+            // Throttle React state updates to once per beat for chord display
+            if (stepToPlay % currentStepsPerBeat === 0) {
+              setCurrentStep(stepToPlay);
+            }
           }, Math.max(0, timeUntilPlayMs));
 
           // 3. Advance internal audio clock and step counter
@@ -628,6 +671,9 @@ const stopPlayback = () => {
     // Reset internal audio pointers
     currentAudioStepRef.current = 0;
     nextNoteTimeRef.current = 0;
+    // Reset visual playhead
+    if (playheadRef.current) playheadRef.current.style.left = '0px';
+    if (headerHighlightRef.current) headerHighlightRef.current.style.left = '0px';
   };
 
   const clearGrid = () => {
@@ -1744,17 +1790,22 @@ const stopPlayback = () => {
         <div className="flex flex-col min-w-max relative touch-none" ref={gridRef}>
           
           {/* Step Timeline Header */}
-          <div className="h-8 shrink-0 flex sticky top-0 z-10 bg-gray-800 border-b border-gray-700">
+          <div className="h-8 shrink-0 flex sticky top-0 z-10 bg-gray-800 border-b border-gray-700 relative">
+            {/* Playback position highlight (ref-driven, no re-renders) */}
+            <div
+              ref={headerHighlightRef}
+              className="absolute top-0 bottom-0 w-10 bg-indigo-500/40 z-10 pointer-events-none"
+              style={{ left: `${visualStep * 40}px` }}
+            />
             {Array.from({ length: numSteps }).map((_, stepIndex) => {
               const isBar = stepIndex % stepsPerBar === 0;
               const isBeat = stepIndex % stepsPerBeat === 0;
-              
+
               return (
-                <div 
-                  key={`header-${stepIndex}`} 
-                  className={`w-10 flex-shrink-0 flex items-center justify-center text-[10px] border-r border-gray-700 transition-colors
+                <div
+                  key={`header-${stepIndex}`}
+                  className={`w-10 flex-shrink-0 flex items-center justify-center text-[10px] border-r border-gray-700
                     ${isBar ? 'bg-gray-700 font-bold text-gray-200' : isBeat ? 'bg-gray-700/40 font-semibold text-gray-400' : 'text-gray-600'}
-                    ${visualStep === stepIndex ? '!bg-indigo-500/40 text-indigo-100' : ''}
                   `}
                 >
                   {isBar ? (stepIndex / stepsPerBar) + 1 : isBeat ? (stepIndex % stepsPerBar) / stepsPerBeat + 1 : ''}
@@ -1767,7 +1818,8 @@ const stopPlayback = () => {
           <div className="relative">
             {/* Playhead Marker */}
             <div
-              className="absolute top-0 bottom-0 bg-white/10 border-l border-white/30 z-30 pointer-events-none transition-all duration-75"
+              ref={playheadRef}
+              className="absolute top-0 bottom-0 bg-white/10 border-l border-white/30 z-30 pointer-events-none"
               style={{ width: '40px', left: `${visualStep * 40}px` }}
             />
 
@@ -1789,28 +1841,28 @@ const stopPlayback = () => {
               const isRoot = note.baseName === selectedKey;
               
               return (
-                <div key={`row-${note.id}`} className="relative flex h-8 shrink-0">
-                  
-                  {/* Background Grid Cells (Clickable to ADD) */}
-                  {Array.from({ length: numSteps }).map((_, stepIndex) => {
-                    const isBar = stepIndex % stepsPerBar === 0;
-                    const isBeat = stepIndex % stepsPerBeat === 0;
-                    
-                    return (
-                      <div
-                        key={`cell-${note.id}-${stepIndex}`}
-                        onPointerDown={(e) => handleBackgroundDown(note.id, stepIndex, e)}
-                        className={`w-10 flex-shrink-0 border-b cursor-pointer transition-colors duration-50
-                          ${isBar ? 'border-r border-r-gray-500' : isBeat ? 'border-r border-r-gray-700' : 'border-r border-r-gray-800'}
-                          ${isRoot ? 'border-b-indigo-900/50' : inScale ? 'border-b-gray-700' : 'border-b-gray-900'}
-                          ${isRoot ? 'bg-indigo-900/60 hover:bg-indigo-800/80' :
-                            inScale ? 'bg-slate-700 hover:bg-slate-600' : 
-                            'bg-gray-950 hover:bg-gray-900'
-                          }
-                        `}
-                      />
-                    );
-                  })}
+                <div key={`row-${note.id}`} className="relative h-8 shrink-0" style={{ width: `${numSteps * 40}px` }}>
+
+                  {/* Background Grid Row — single div with CSS gradients instead of N individual cells */}
+                  <div
+                    className={`absolute inset-0 cursor-pointer
+                      ${isRoot ? 'bg-indigo-900/60 hover:brightness-125' :
+                        inScale ? 'bg-slate-700 hover:brightness-110' :
+                        'bg-gray-950 hover:brightness-150'
+                      }
+                    `}
+                    style={{
+                      backgroundImage: gridBackgroundImage,
+                      borderBottom: `1px solid ${isRoot ? 'rgba(99, 102, 241, 0.5)' : inScale ? '#374151' : '#111827'}`,
+                    }}
+                    onPointerDown={(e) => {
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      const stepIndex = Math.floor((e.clientX - rect.left) / 40);
+                      if (stepIndex >= 0 && stepIndex < numSteps) {
+                        handleBackgroundDown(note.id, stepIndex, e);
+                      }
+                    }}
+                  />
 
                   {/* AI Suggested Ghost Notes */}
                   {suggestedNotes.filter(s => s.id === note.id).map(sugg => (
@@ -1818,14 +1870,14 @@ const stopPlayback = () => {
                       key={`sugg-${sugg.id}-${sugg.stepIndex}`}
                       onPointerDown={(e) => handleSuggestionClick(sugg, e)}
                       className="absolute top-0 h-full p-[2px] cursor-pointer z-10 group"
-                      style={{ 
-                        left: `${sugg.stepIndex * 40}px`, 
-                        width: `${sugg.duration * 40}px` 
+                      style={{
+                        left: `${sugg.stepIndex * 40}px`,
+                        width: `${sugg.duration * 40}px`
                       }}
                     >
-                      <div className={`w-full h-full rounded-sm border border-dashed flex items-center justify-center px-1 transition-all
-                        ${sugg.type === 'smooth' 
-                          ? 'bg-teal-500/10 border-teal-500/50 hover:bg-teal-500/30' 
+                      <div className={`w-full h-full rounded-sm border border-dashed flex items-center justify-center px-1
+                        ${sugg.type === 'smooth'
+                          ? 'bg-teal-500/10 border-teal-500/50 hover:bg-teal-500/30'
                           : 'bg-fuchsia-500/10 border-fuchsia-500/50 hover:bg-fuchsia-500/30'
                         }
                       `}>
@@ -1838,32 +1890,27 @@ const stopPlayback = () => {
                     </div>
                   ))}
 
-                  {/* Foreground Active Notes (Clickable to REMOVE) */}
-                  {Array.from({ length: numSteps }).map((_, stepIndex) => {
-                    const duration = activeNotes[`${note.id}-${stepIndex}`];
-                    if (!duration) return null;
-
-                    const noteKey = `${note.id}-${stepIndex}`;
+                  {/* Foreground Active Notes — direct iteration instead of scanning all cells */}
+                  {(notesByRow[note.id] || []).map(({ step: stepIndex, duration, key: noteKey }) => {
                     const isSelected = selectedNotes.has(noteKey);
 
                     let noteColorClass = "bg-indigo-500 border-indigo-400"; // Default
 
                     if (isSelected) {
-                      // Selected notes get a special cyan highlight
                       noteColorClass = "bg-cyan-500 border-cyan-300 ring-2 ring-cyan-400 ring-offset-1 ring-offset-gray-950";
                     } else if (heatmapEnabled) {
                       if (stepIndex % stepsPerBeat === 0) {
-                        noteColorClass = "bg-indigo-500 border-indigo-400"; // Downbeat
+                        noteColorClass = "bg-indigo-500 border-indigo-400";
                       } else if (stepIndex % (stepsPerBeat / 2) === 0) {
-                        noteColorClass = "bg-teal-500 border-teal-400"; // Upbeat
+                        noteColorClass = "bg-teal-500 border-teal-400";
                       } else {
-                        noteColorClass = "bg-amber-500 border-amber-400"; // Syncopated
+                        noteColorClass = "bg-amber-500 border-amber-400";
                       }
                     }
 
                     return (
                       <div
-                        key={`note-${note.id}-${stepIndex}`}
+                        key={noteKey}
                         onPointerDown={(e) => handleNoteBodyDown(note.id, stepIndex, e)}
                         className={`absolute top-0 h-full p-[2px] z-20 group ${
                           selectionMode ? 'cursor-move' : 'cursor-pointer'
@@ -1873,11 +1920,10 @@ const stopPlayback = () => {
                           width: `${duration * 40}px`
                         }}
                       >
-                        <div className={`w-full h-full rounded-sm shadow-[inset_0_0_10px_rgba(0,0,0,0.2)] border hover:brightness-110 transition-all relative overflow-hidden flex items-center px-1 ${noteColorClass} ${
+                        <div className={`w-full h-full rounded-sm shadow-[inset_0_0_10px_rgba(0,0,0,0.2)] border hover:brightness-110 relative overflow-hidden flex items-center px-1 ${noteColorClass} ${
                           isSelected ? 'opacity-100 scale-[1.02]' : 'opacity-90'
                         }`}>
-                          
-                          {/* Duration Text */}
+
                           {getDurationLabel(duration, stepsPerBar) && (
                             <span className="text-[10px] font-bold text-white/90 pointer-events-none select-none z-10 drop-shadow-md">
                               {getDurationLabel(duration, stepsPerBar)}
@@ -1888,9 +1934,8 @@ const stopPlayback = () => {
                             <div className="absolute left-2 right-2 h-[2px] bg-black/30 rounded-full pointer-events-none"></div>
                           )}
 
-                          {/* Edge Drag Handle */}
-                          <div 
-                            className="absolute right-0 top-0 bottom-0 w-3 cursor-ew-resize hover:bg-white/40 z-30 transition-colors"
+                          <div
+                            className="absolute right-0 top-0 bottom-0 w-3 cursor-ew-resize hover:bg-white/40 z-30"
                             onPointerDown={(e) => handleNoteEdgeDown(note.id, stepIndex, e)}
                           />
                         </div>

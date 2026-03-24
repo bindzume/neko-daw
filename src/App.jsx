@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Play, Square, Trash2, Volume2, Music, Waves, Settings2, Download, Upload } from 'lucide-react';
+import { Play, Square, Trash2, Volume2, Music, Waves, Settings2, Download, Upload, FolderOpen, Save } from 'lucide-react';
 import MidiWriter from 'midi-writer-js';
 
 // --- Music Theory & Constants ---
@@ -206,7 +206,7 @@ const getDurationLabel = (steps, stepsPerBar) => {
 };
 
 export default function App() {
-  
+
   // --- State ---
   const [activeNotes, setActiveNotes] = useState({});
   const [isPlaying, setIsPlaying] = useState(false);
@@ -218,19 +218,26 @@ export default function App() {
   const [selectedScale, setSelectedScale] = useState('Major');
   const [waveform, setWaveform] = useState('triangle');
   const [drawMode, setDrawMode] = useState('Single Note');
-  
+
   // --- Heatmap State ---
   const [heatmapEnabled, setHeatmapEnabled] = useState(true);
-  
+
   // --- AI Assist State ---
   const [aiAssistEnabled, setAiAssistEnabled] = useState(false);
   const [lastActionKey, setLastActionKey] = useState(null);
-  
+
   // --- UI State ---
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
   // --- Drag & Drop State ---
   const [dragAction, setDragAction] = useState(null);
+
+  // --- Project Management State ---
+  const [currentProjectId, setCurrentProjectId] = useState(null);
+  const [projectList, setProjectList] = useState([]);
+  const [showProjectManager, setShowProjectManager] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [lastSaved, setLastSaved] = useState(null);
 
   // --- Dynamic Grid Calculations ---
   const { stepsPerBeat, stepsPerBar } = useMemo(() => getTimeSigConfig(timeSignature), [timeSignature]);
@@ -274,6 +281,174 @@ export default function App() {
   useEffect(() => {
     stateRef.current = { activeNotes, waveform, volume, bpm, numSteps };
   }, [activeNotes, waveform, volume, bpm, numSteps]);
+
+  // --- LocalStorage Utilities ---
+  const STORAGE_KEY = 'melody-maker-projects';
+  const CURRENT_PROJECT_KEY = 'melody-maker-current-project';
+
+  const loadProjectsFromStorage = () => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      return stored ? JSON.parse(stored) : [];
+    } catch (err) {
+      console.error('Failed to load projects:', err);
+      return [];
+    }
+  };
+
+  const saveProjectsToStorage = (projects) => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(projects));
+    } catch (err) {
+      console.error('Failed to save projects:', err);
+    }
+  };
+
+  const getCurrentProjectData = () => ({
+    activeNotes,
+    bpm,
+    timeSignature,
+    volume,
+    selectedKey,
+    selectedScale,
+    waveform,
+    drawMode
+  });
+
+  const saveCurrentProject = (projectId = currentProjectId, projectName = null) => {
+    setIsSaving(true);
+
+    const projects = loadProjectsFromStorage();
+    const projectData = getCurrentProjectData();
+    const timestamp = new Date().toISOString();
+
+    let updatedProjects;
+    let finalProjectId = projectId;
+
+    if (projectId) {
+      // Update existing project
+      updatedProjects = projects.map(p =>
+        p.id === projectId
+          ? { ...p, data: projectData, updatedAt: timestamp, name: projectName || p.name }
+          : p
+      );
+    } else {
+      // Create new project
+      finalProjectId = `project-${Date.now()}`;
+      const newProject = {
+        id: finalProjectId,
+        name: projectName || `Untitled ${projects.length + 1}`,
+        data: projectData,
+        createdAt: timestamp,
+        updatedAt: timestamp
+      };
+      updatedProjects = [...projects, newProject];
+      setCurrentProjectId(finalProjectId);
+      localStorage.setItem(CURRENT_PROJECT_KEY, finalProjectId);
+    }
+
+    saveProjectsToStorage(updatedProjects);
+    setProjectList(updatedProjects);
+    setLastSaved(timestamp);
+
+    setTimeout(() => setIsSaving(false), 300);
+    return finalProjectId;
+  };
+
+  const loadProject = (projectId) => {
+    const projects = loadProjectsFromStorage();
+    const project = projects.find(p => p.id === projectId);
+
+    if (!project) return;
+
+    const data = project.data;
+    setActiveNotes(data.activeNotes || {});
+    setBpm(data.bpm || 120);
+    setTimeSignature(data.timeSignature || '4/4');
+    setVolume(data.volume || 0.5);
+    setSelectedKey(data.selectedKey || 'C');
+    setSelectedScale(data.selectedScale || 'Major');
+    setWaveform(data.waveform || 'triangle');
+    setDrawMode(data.drawMode || 'Single Note');
+
+    setCurrentProjectId(projectId);
+    localStorage.setItem(CURRENT_PROJECT_KEY, projectId);
+    setLastSaved(project.updatedAt);
+  };
+
+  const deleteProject = (projectId) => {
+    const projects = loadProjectsFromStorage();
+    const updatedProjects = projects.filter(p => p.id !== projectId);
+    saveProjectsToStorage(updatedProjects);
+    setProjectList(updatedProjects);
+
+    if (currentProjectId === projectId) {
+      // If we deleted the current project, create a new one
+      setCurrentProjectId(null);
+      localStorage.removeItem(CURRENT_PROJECT_KEY);
+    }
+  };
+
+  const createNewProject = () => {
+    // Clear current state
+    setActiveNotes({});
+    setBpm(120);
+    setTimeSignature('4/4');
+    setVolume(0.5);
+    setSelectedKey('C');
+    setSelectedScale('Major');
+    setWaveform('triangle');
+    setDrawMode('Single Note');
+    setLastActionKey(null);
+
+    setCurrentProjectId(null);
+    localStorage.removeItem(CURRENT_PROJECT_KEY);
+    setLastSaved(null);
+  };
+
+  const renameProject = (projectId, newName) => {
+    const projects = loadProjectsFromStorage();
+    const updatedProjects = projects.map(p =>
+      p.id === projectId ? { ...p, name: newName } : p
+    );
+    saveProjectsToStorage(updatedProjects);
+    setProjectList(updatedProjects);
+  };
+
+  const getCurrentProjectName = () => {
+    if (!currentProjectId) return 'Untitled';
+    const project = projectList.find(p => p.id === currentProjectId);
+    return project?.name || 'Untitled';
+  };
+
+  // Load projects on mount
+  useEffect(() => {
+    const projects = loadProjectsFromStorage();
+    setProjectList(projects);
+
+    // Try to load the last active project
+    const lastProjectId = localStorage.getItem(CURRENT_PROJECT_KEY);
+    if (lastProjectId && projects.find(p => p.id === lastProjectId)) {
+      loadProject(lastProjectId);
+    } else if (projects.length === 0) {
+      // Create initial project if none exist
+      const initialProjectId = saveCurrentProject(null, 'My First Song');
+      setCurrentProjectId(initialProjectId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Auto-save functionality (debounced)
+  useEffect(() => {
+    if (!currentProjectId) return; // Don't auto-save if no project is active
+
+    const autoSaveTimeout = setTimeout(() => {
+      saveCurrentProject(currentProjectId);
+    }, 2000); // Auto-save after 2 seconds of inactivity
+
+    return () => clearTimeout(autoSaveTimeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeNotes, bpm, timeSignature, volume, selectedKey, selectedScale, waveform, drawMode]);
 
   // --- Audio Engine ---
   const initAudio = () => {
@@ -417,22 +592,14 @@ const stopPlayback = () => {
 
   // --- Export & Import ---
   const exportProject = () => {
-    const projectData = {
-      activeNotes,
-      bpm,
-      timeSignature,
-      volume,
-      selectedKey,
-      selectedScale,
-      waveform,
-      drawMode
-    };
-    
+    const projectData = getCurrentProjectData();
+    const projectName = getCurrentProjectName();
+
     const blob = new Blob([JSON.stringify(projectData, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `melody-maker-${new Date().getTime()}.json`;
+    a.download = `${projectName.replace(/[^a-z0-9]/gi, '_').toLowerCase()}-${new Date().getTime()}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -445,6 +612,8 @@ const stopPlayback = () => {
     reader.onload = (event) => {
       try {
         const data = JSON.parse(event.target.result);
+
+        // Load the imported data into current state
         if (data.activeNotes) setActiveNotes(data.activeNotes);
         if (data.bpm) setBpm(data.bpm);
         if (data.timeSignature) setTimeSignature(data.timeSignature);
@@ -453,6 +622,13 @@ const stopPlayback = () => {
         if (data.selectedScale) setSelectedScale(data.selectedScale);
         if (data.waveform) setWaveform(data.waveform);
         if (data.drawMode) setDrawMode(data.drawMode);
+
+        // Create a new project with the imported data
+        const fileName = file.name.replace('.json', '');
+        setTimeout(() => {
+          const newProjectId = saveCurrentProject(null, `Imported: ${fileName}`);
+          setCurrentProjectId(newProjectId);
+        }, 100);
       } catch (err) {
         alert("Failed to load project. The file might be corrupted.");
       }
@@ -894,13 +1070,13 @@ const stopPlayback = () => {
             <h3 className="text-lg font-bold text-white mb-2">Clear All Notes?</h3>
             <p className="text-gray-400 text-sm mb-6">Are you sure you want to completely clear the grid? This action cannot be undone.</p>
             <div className="flex justify-end gap-3">
-              <button 
+              <button
                 onClick={() => setShowClearConfirm(false)}
                 className="px-4 py-2 text-sm text-gray-300 hover:text-white transition-colors focus:outline-none"
               >
                 Cancel
               </button>
-              <button 
+              <button
                 onClick={confirmClear}
                 className="px-4 py-2 text-sm bg-red-600/80 hover:bg-red-600 text-white rounded transition-colors font-medium focus:outline-none focus:ring-2 focus:ring-red-500/50"
               >
@@ -911,15 +1087,118 @@ const stopPlayback = () => {
         </div>
       )}
 
+      {/* Project Manager Modal */}
+      {showProjectManager && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-gray-900 border border-gray-700 rounded-lg shadow-2xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col">
+            <div className="p-6 border-b border-gray-700 flex items-center justify-between">
+              <h3 className="text-xl font-bold text-white">Projects</h3>
+              <button
+                onClick={() => setShowProjectManager(false)}
+                className="text-gray-400 hover:text-white transition-colors text-2xl leading-none"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-auto p-6">
+              <button
+                onClick={() => {
+                  createNewProject();
+                  setShowProjectManager(false);
+                }}
+                className="w-full mb-4 px-4 py-3 bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/50 text-indigo-300 rounded-lg transition-colors font-medium flex items-center justify-center gap-2"
+              >
+                <span className="text-xl">+</span> New Project
+              </button>
+
+              <div className="space-y-2">
+                {projectList.length === 0 ? (
+                  <div className="text-center text-gray-500 py-8">
+                    No projects yet. Create your first one!
+                  </div>
+                ) : (
+                  projectList.map((project) => (
+                    <div
+                      key={project.id}
+                      className={`p-4 rounded-lg border transition-all ${
+                        currentProjectId === project.id
+                          ? 'bg-indigo-900/30 border-indigo-500/50'
+                          : 'bg-gray-800 border-gray-700 hover:border-gray-600'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex-1 min-w-0">
+                          <input
+                            type="text"
+                            value={project.name}
+                            onChange={(e) => renameProject(project.id, e.target.value)}
+                            className="bg-transparent border-none text-white font-medium text-lg w-full focus:outline-none focus:ring-2 focus:ring-indigo-500 rounded px-2 -mx-2"
+                          />
+                          <div className="text-xs text-gray-400 mt-1">
+                            Updated: {new Date(project.updatedAt).toLocaleString()}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          {currentProjectId !== project.id && (
+                            <button
+                              onClick={() => {
+                                loadProject(project.id);
+                                setShowProjectManager(false);
+                              }}
+                              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-sm font-medium transition-colors"
+                            >
+                              Load
+                            </button>
+                          )}
+                          <button
+                            onClick={() => {
+                              if (window.confirm(`Delete "${project.name}"? This cannot be undone.`)) {
+                                deleteProject(project.id);
+                              }
+                            }}
+                            className="px-3 py-1.5 bg-red-600/20 hover:bg-red-600/30 text-red-400 rounded text-sm font-medium transition-colors"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header & Controls */}
       <header className="flex items-center justify-between px-6 py-4 bg-gray-900 border-b border-gray-800 shrink-0">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-4">
           <div className="bg-indigo-600 p-2 rounded-lg">
             <Music className="w-5 h-5 text-white" />
           </div>
-          <h1 className="text-xl font-bold text-white tracking-tight">Melody Maker</h1>
+          <div className="flex flex-col">
+            <h1 className="text-xl font-bold text-white tracking-tight">Melody Maker</h1>
+            <div className="flex items-center gap-2 text-xs">
+              <button
+                onClick={() => setShowProjectManager(true)}
+                className="text-indigo-300 hover:text-indigo-200 font-medium transition-colors"
+              >
+                {getCurrentProjectName()}
+              </button>
+              <span className="text-gray-600">•</span>
+              <span className={`transition-opacity ${isSaving ? 'opacity-100' : 'opacity-0'}`}>
+                <span className="text-emerald-400">Saving...</span>
+              </span>
+              <span className={`transition-opacity ${!isSaving && lastSaved ? 'opacity-100' : 'opacity-0'}`}>
+                <span className="text-gray-500">Saved {lastSaved ? new Date(lastSaved).toLocaleTimeString() : ''}</span>
+              </span>
+            </div>
+          </div>
         </div>
-        
+
         <div className="flex items-center gap-6">
           {/* Transport Controls */}
           <div className="flex items-center bg-gray-950 rounded-lg border border-gray-800 p-1">
@@ -984,30 +1263,49 @@ const stopPlayback = () => {
           </div>
           
           <div className="flex items-center gap-2 border-l border-gray-800 pl-4 ml-2">
-            <input 
-              type="file" 
-              accept=".json" 
-              ref={fileInputRef} 
-              onChange={importProject} 
-              className="hidden" 
+            <button
+              onClick={() => setShowProjectManager(true)}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/50 text-indigo-300 transition-colors text-sm font-medium"
+              title="Manage Projects"
+            >
+              <FolderOpen className="w-4 h-4" />
+              Projects
+            </button>
+            <button
+              onClick={() => saveCurrentProject(currentProjectId)}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-md hover:bg-gray-800 text-gray-400 hover:text-white transition-colors text-sm"
+              title="Save Project"
+            >
+              <Save className="w-4 h-4" />
+              Save
+            </button>
+
+            <div className="w-px h-6 bg-gray-700 mx-1"></div>
+
+            <input
+              type="file"
+              accept=".json"
+              ref={fileInputRef}
+              onChange={importProject}
+              className="hidden"
             />
-            <button 
+            <button
               onClick={() => fileInputRef.current?.click()}
               className="flex items-center gap-2 px-3 py-1.5 rounded-md hover:bg-gray-800 text-gray-400 hover:text-white transition-colors text-sm"
-              title="Import Project"
+              title="Import JSON File"
             >
               <Upload className="w-4 h-4" />
               Import
             </button>
-            <button 
+            <button
               onClick={exportProject}
               className="flex items-center gap-2 px-3 py-1.5 rounded-md hover:bg-gray-800 text-gray-400 hover:text-white transition-colors text-sm"
-              title="Export Project"
+              title="Export as JSON File"
             >
               <Download className="w-4 h-4" />
               Export
             </button>
-            <button 
+            <button
               onClick={clearGrid}
               className="flex items-center gap-2 px-3 py-1.5 rounded-md hover:bg-red-500/20 text-gray-400 hover:text-red-400 transition-colors text-sm ml-2"
               title="Clear Grid"

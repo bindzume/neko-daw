@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Play, Square, Trash2, Volume2, Music, Waves, Settings2, Download, Upload, FolderOpen, Save, Repeat } from 'lucide-react';
+import { Play, Square, Trash2, Volume2, Music, Waves, Settings2, Download, Upload, FolderOpen, Save, Repeat, Undo2, Redo2 } from 'lucide-react';
 import MidiWriter from 'midi-writer-js';
 
 // --- Music Theory & Constants ---
@@ -315,6 +315,8 @@ export default function App() {
   const headerHighlightRef = useRef(null);
   const loopDragStartRef = useRef(null);
   const clipboardRef = useRef(null); // [{ noteId, stepOffset, duration }]
+  const historyRef = useRef({ past: [], future: [] });
+  const [historyVersion, setHistoryVersion] = useState(0); // triggers re-render for button states
   
   // NEW REFS for Lookahead Scheduling
   const scheduleIntervalRef = useRef(null);
@@ -326,6 +328,42 @@ export default function App() {
   useEffect(() => {
     stateRef.current = { activeNotes, waveform, volume, bpm, numSteps, stepsPerBeat, loopRegion, loopEnabled };
   }, [activeNotes, waveform, volume, bpm, numSteps, stepsPerBeat, loopRegion, loopEnabled]);
+
+  // --- Undo/Redo ---
+  const MAX_HISTORY = 50;
+
+  const pushHistory = (snapshot) => {
+    historyRef.current.past.push(snapshot);
+    if (historyRef.current.past.length > MAX_HISTORY) historyRef.current.past.shift();
+    historyRef.current.future = [];
+    setHistoryVersion(v => v + 1);
+  };
+
+  const clearHistory = () => {
+    historyRef.current = { past: [], future: [] };
+    setHistoryVersion(v => v + 1);
+  };
+
+  const undo = () => {
+    const { past, future } = historyRef.current;
+    if (past.length === 0) return;
+    const prev = past.pop();
+    future.push(stateRef.current.activeNotes);
+    setActiveNotes(prev);
+    setHistoryVersion(v => v + 1);
+  };
+
+  const redo = () => {
+    const { past, future } = historyRef.current;
+    if (future.length === 0) return;
+    const next = future.pop();
+    past.push(stateRef.current.activeNotes);
+    setActiveNotes(next);
+    setHistoryVersion(v => v + 1);
+  };
+
+  const canUndo = historyRef.current.past.length > 0;
+  const canRedo = historyRef.current.future.length > 0;
 
   // --- LocalStorage Utilities ---
   const STORAGE_KEY = 'melody-maker-projects';
@@ -406,6 +444,7 @@ export default function App() {
 
     if (!project) return;
 
+    clearHistory();
     const data = project.data;
     setActiveNotes(data.activeNotes || {});
     setBpm(data.bpm || 120);
@@ -435,6 +474,7 @@ export default function App() {
   };
 
   const createNewProject = () => {
+    clearHistory();
     // Clear current state
     setActiveNotes({});
     setBpm(120);
@@ -498,9 +538,22 @@ export default function App() {
   // --- Keyboard Shortcuts ---
   useEffect(() => {
     const handleKeyDown = (e) => {
+      // Undo (Ctrl+Z / Cmd+Z)
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      }
+
+      // Redo (Ctrl+Shift+Z / Cmd+Shift+Z or Ctrl+Y / Cmd+Y)
+      if ((e.ctrlKey || e.metaKey) && ((e.key === 'z' && e.shiftKey) || e.key === 'y')) {
+        e.preventDefault();
+        redo();
+      }
+
       // Delete selected notes
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedNotes.size > 0) {
         e.preventDefault();
+        pushHistory(activeNotes);
         setActiveNotes(prev => {
           const updated = { ...prev };
           selectedNotes.forEach(key => delete updated[key]);
@@ -566,6 +619,7 @@ export default function App() {
           duration: n.duration
         }));
         // Then delete
+        pushHistory(activeNotes);
         setActiveNotes(prev => {
           const updated = { ...prev };
           selectedNotes.forEach(key => delete updated[key]);
@@ -577,6 +631,7 @@ export default function App() {
       // Paste notes (Ctrl+V / Cmd+V)
       if ((e.ctrlKey || e.metaKey) && e.key === 'v' && clipboardRef.current && clipboardRef.current.length > 0) {
         e.preventDefault();
+        pushHistory(activeNotes);
         const pasteStep = currentStep % numSteps;
         const newSelected = new Set();
         setActiveNotes(prev => {
@@ -764,6 +819,7 @@ const stopPlayback = () => {
   };
 
   const confirmClear = () => {
+    pushHistory(activeNotes);
     setActiveNotes({});
     setLastActionKey(null);
     setShowClearConfirm(false);
@@ -793,6 +849,7 @@ const stopPlayback = () => {
         const data = JSON.parse(event.target.result);
 
         // Load the imported data into current state
+        clearHistory();
         if (data.activeNotes) setActiveNotes(data.activeNotes);
         if (data.bpm) setBpm(data.bpm);
         if (data.timeSignature) setTimeSignature(data.timeSignature);
@@ -913,6 +970,7 @@ const stopPlayback = () => {
 
   // --- Progression Insertion ---
   const insertProgression = (e) => {
+    pushHistory(activeNotes);
     const progressionName = e.target.value;
     if (!progressionName) return;
     
@@ -1120,6 +1178,7 @@ const stopPlayback = () => {
     }
 
     // Normal draw mode
+    pushHistory(activeNotes);
     const targetNotes = getChordNotes(noteId);
     const newNotes = { ...activeNotes };
 
@@ -1149,6 +1208,8 @@ const stopPlayback = () => {
     const noteKey = `${noteId}-${stepIndex}`;
 
     if (selectionMode) {
+      // Save for undo before drag starts
+      pushHistory(activeNotes);
       // Get rect for drag start position
       const rect = gridRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left;
@@ -1188,6 +1249,7 @@ const stopPlayback = () => {
     }
 
     // Normal mode: delete the note
+    pushHistory(activeNotes);
     setActiveNotes(prev => {
       const updated = { ...prev };
       delete updated[noteKey];
@@ -1198,6 +1260,7 @@ const stopPlayback = () => {
 
   const handleNoteEdgeDown = (noteId, stepIndex, e) => {
     e.stopPropagation();
+    pushHistory(activeNotes);
     setDragAction({ type: 'resize', notes: [noteId], startStep: stepIndex });
   };
 
@@ -1561,6 +1624,30 @@ const stopPlayback = () => {
               title={loopRegion ? (loopEnabled ? 'Disable Loop' : 'Enable Loop') : 'Shift+drag timeline to set loop region'}
             >
               <Repeat className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* Undo / Redo */}
+          <div className="flex items-center bg-gray-950 rounded-lg border border-gray-800 p-1">
+            <button
+              onClick={undo}
+              disabled={!canUndo}
+              className={`p-2 rounded-md transition-colors ${
+                canUndo ? 'hover:bg-gray-800 text-gray-400 hover:text-white' : 'text-gray-700 cursor-not-allowed'
+              }`}
+              title="Undo (Ctrl+Z)"
+            >
+              <Undo2 className="w-4 h-4" />
+            </button>
+            <button
+              onClick={redo}
+              disabled={!canRedo}
+              className={`p-2 rounded-md transition-colors ${
+                canRedo ? 'hover:bg-gray-800 text-gray-400 hover:text-white' : 'text-gray-700 cursor-not-allowed'
+              }`}
+              title="Redo (Ctrl+Shift+Z)"
+            >
+              <Redo2 className="w-4 h-4" />
             </button>
           </div>
 

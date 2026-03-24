@@ -1790,7 +1790,20 @@ const stopPlayback = () => {
         <div className="flex flex-col min-w-max relative touch-none" ref={gridRef}>
           
           {/* Step Timeline Header */}
-          <div className="h-8 shrink-0 flex sticky top-0 z-10 bg-gray-800 border-b border-gray-700 relative">
+          <div
+            className="h-8 shrink-0 flex sticky top-0 z-10 bg-gray-800 border-b border-gray-700 relative cursor-pointer"
+            onPointerDown={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const stepIndex = Math.floor((e.clientX - rect.left) / 40);
+              if (stepIndex >= 0 && stepIndex < numSteps) {
+                setCurrentStep(stepIndex);
+                currentAudioStepRef.current = stepIndex;
+                nextNoteTimeRef.current = 0;
+                if (playheadRef.current) playheadRef.current.style.left = `${stepIndex * 40}px`;
+                if (headerHighlightRef.current) headerHighlightRef.current.style.left = `${stepIndex * 40}px`;
+              }
+            }}
+          >
             {/* Playback position highlight (ref-driven, no re-renders) */}
             <div
               ref={headerHighlightRef}

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Play, Square, Trash2, Volume2, Music, Waves, Settings2, Download, Upload, FolderOpen, Save } from 'lucide-react';
+import { Play, Square, Trash2, Volume2, Music, Waves, Settings2, Download, Upload, FolderOpen, Save, Repeat } from 'lucide-react';
 import MidiWriter from 'midi-writer-js';
 
 // --- Music Theory & Constants ---
@@ -250,6 +250,10 @@ export default function App() {
   const [isDraggingSelection, setIsDraggingSelection] = useState(false);
   const [selectionDragStart, setSelectionDragStart] = useState(null); // { x, y, originalNotes: Map<key, {noteId, step, duration, noteIndex}> }
 
+  // --- Loop State ---
+  const [loopRegion, setLoopRegion] = useState(null); // { start, end } step indices
+  const [loopEnabled, setLoopEnabled] = useState(false);
+
   // --- Project Management State ---
   const [currentProjectId, setCurrentProjectId] = useState(null);
   const [projectList, setProjectList] = useState([]);
@@ -309,6 +313,7 @@ export default function App() {
   const fileInputRef = useRef(null);
   const playheadRef = useRef(null);
   const headerHighlightRef = useRef(null);
+  const loopDragStartRef = useRef(null);
   
   // NEW REFS for Lookahead Scheduling
   const scheduleIntervalRef = useRef(null);
@@ -316,10 +321,10 @@ export default function App() {
   const currentAudioStepRef = useRef(0);
   
   // Keep mutable state in refs for the audio loop to avoid dependency cycle restarts
-  const stateRef = useRef({ activeNotes, waveform, volume, bpm, numSteps, stepsPerBeat });
+  const stateRef = useRef({ activeNotes, waveform, volume, bpm, numSteps, stepsPerBeat, loopRegion, loopEnabled });
   useEffect(() => {
-    stateRef.current = { activeNotes, waveform, volume, bpm, numSteps, stepsPerBeat };
-  }, [activeNotes, waveform, volume, bpm, numSteps, stepsPerBeat]);
+    stateRef.current = { activeNotes, waveform, volume, bpm, numSteps, stepsPerBeat, loopRegion, loopEnabled };
+  }, [activeNotes, waveform, volume, bpm, numSteps, stepsPerBeat, loopRegion, loopEnabled]);
 
   // --- LocalStorage Utilities ---
   const STORAGE_KEY = 'melody-maker-projects';
@@ -630,7 +635,14 @@ export default function App() {
 
           // 3. Advance internal audio clock and step counter
           nextNoteTimeRef.current += stepTimeSecs;
-          currentAudioStepRef.current = (stepToPlay + 1) % currentNumSteps;
+          const nextStep = stepToPlay + 1;
+          const lr = stateRef.current.loopRegion;
+          const le = stateRef.current.loopEnabled;
+          if (le && lr && nextStep >= lr.end) {
+            currentAudioStepRef.current = lr.start;
+          } else {
+            currentAudioStepRef.current = nextStep % currentNumSteps;
+          }
         }
       };
 
@@ -888,6 +900,15 @@ const stopPlayback = () => {
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
 
+      // Handle loop region dragging
+      if (loopDragStartRef.current !== null) {
+        const stepIndex = Math.max(0, Math.min(numSteps - 1, Math.floor(x / 40)));
+        const start = Math.min(loopDragStartRef.current, stepIndex);
+        const end = Math.max(loopDragStartRef.current, stepIndex) + 1;
+        setLoopRegion({ start, end: Math.min(end, numSteps) });
+        return;
+      }
+
       // Handle selection box dragging
       if (selectionBox && !isDraggingSelection) {
         setSelectionBox(prev => ({ ...prev, endX: x, endY: y }));
@@ -965,6 +986,11 @@ const stopPlayback = () => {
     };
 
     const handlePointerUp = () => {
+      // Finalize loop region drag
+      if (loopDragStartRef.current !== null) {
+        loopDragStartRef.current = null;
+      }
+
       // Finalize selection box
       if (selectionBox && !isDraggingSelection) {
         const { startX, startY, endX, endY } = selectionBox;
@@ -1454,6 +1480,17 @@ const stopPlayback = () => {
             >
               <Square className="w-4 h-4 fill-current" />
             </button>
+            <button
+              onClick={() => setLoopEnabled(!loopEnabled)}
+              className={`p-2 rounded-md transition-colors ${
+                loopEnabled
+                  ? 'bg-amber-600/30 text-amber-400'
+                  : 'hover:bg-gray-800 text-gray-400 hover:text-white'
+              }`}
+              title={loopRegion ? (loopEnabled ? 'Disable Loop' : 'Enable Loop') : 'Shift+drag timeline to set loop region'}
+            >
+              <Repeat className="w-4 h-4" />
+            </button>
           </div>
 
           {/* Selection Mode Toggle */}
@@ -1796,14 +1833,32 @@ const stopPlayback = () => {
               const rect = e.currentTarget.getBoundingClientRect();
               const stepIndex = Math.floor((e.clientX - rect.left) / 40);
               if (stepIndex >= 0 && stepIndex < numSteps) {
-                setCurrentStep(stepIndex);
-                currentAudioStepRef.current = stepIndex;
-                nextNoteTimeRef.current = 0;
-                if (playheadRef.current) playheadRef.current.style.left = `${stepIndex * 40}px`;
-                if (headerHighlightRef.current) headerHighlightRef.current.style.left = `${stepIndex * 40}px`;
+                if (e.shiftKey) {
+                  // Shift+drag: set loop region
+                  loopDragStartRef.current = stepIndex;
+                  setLoopRegion({ start: stepIndex, end: stepIndex + 1 });
+                  setLoopEnabled(true);
+                } else {
+                  // Normal click: seek playhead
+                  setCurrentStep(stepIndex);
+                  currentAudioStepRef.current = stepIndex;
+                  nextNoteTimeRef.current = 0;
+                  if (playheadRef.current) playheadRef.current.style.left = `${stepIndex * 40}px`;
+                  if (headerHighlightRef.current) headerHighlightRef.current.style.left = `${stepIndex * 40}px`;
+                }
               }
             }}
           >
+            {/* Loop region highlight */}
+            {loopEnabled && loopRegion && (
+              <div
+                className="absolute top-0 bottom-0 bg-amber-500/25 border-l-2 border-r-2 border-amber-500/60 z-5 pointer-events-none"
+                style={{
+                  left: `${loopRegion.start * 40}px`,
+                  width: `${(loopRegion.end - loopRegion.start) * 40}px`
+                }}
+              />
+            )}
             {/* Playback position highlight (ref-driven, no re-renders) */}
             <div
               ref={headerHighlightRef}
@@ -1835,6 +1890,18 @@ const stopPlayback = () => {
               className="absolute top-0 bottom-0 bg-white/10 border-l border-white/30 z-30 pointer-events-none"
               style={{ width: '40px', left: `${visualStep * 40}px` }}
             />
+
+            {/* Loop region overlay */}
+            {loopEnabled && loopRegion && (
+              <div
+                className="absolute top-0 bottom-0 bg-amber-500/5 border-l-2 border-r-2 border-amber-500/30 pointer-events-none"
+                style={{
+                  left: `${loopRegion.start * 40}px`,
+                  width: `${(loopRegion.end - loopRegion.start) * 40}px`,
+                  zIndex: 4
+                }}
+              />
+            )}
 
             {/* Selection Box */}
             {selectionBox && (

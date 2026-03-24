@@ -314,6 +314,7 @@ export default function App() {
   const playheadRef = useRef(null);
   const headerHighlightRef = useRef(null);
   const loopDragStartRef = useRef(null);
+  const clipboardRef = useRef(null); // [{ noteId, stepOffset, duration }]
   
   // NEW REFS for Lookahead Scheduling
   const scheduleIntervalRef = useRef(null);
@@ -521,6 +522,76 @@ export default function App() {
         setSelectedNotes(new Set(Object.keys(activeNotes)));
       }
 
+      // Copy selected notes (Ctrl+C / Cmd+C)
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c' && selectedNotes.size > 0) {
+        e.preventDefault();
+        const notes = [];
+        let minStep = Infinity;
+        selectedNotes.forEach(key => {
+          const lastDash = key.lastIndexOf('-');
+          const noteId = key.substring(0, lastDash);
+          const step = parseInt(key.substring(lastDash + 1), 10);
+          const duration = activeNotes[key];
+          if (duration) {
+            if (step < minStep) minStep = step;
+            notes.push({ noteId, step, duration });
+          }
+        });
+        clipboardRef.current = notes.map(n => ({
+          noteId: n.noteId,
+          stepOffset: n.step - minStep,
+          duration: n.duration
+        }));
+      }
+
+      // Cut selected notes (Ctrl+X / Cmd+X)
+      if ((e.ctrlKey || e.metaKey) && e.key === 'x' && selectedNotes.size > 0) {
+        e.preventDefault();
+        // Copy first
+        const notes = [];
+        let minStep = Infinity;
+        selectedNotes.forEach(key => {
+          const lastDash = key.lastIndexOf('-');
+          const noteId = key.substring(0, lastDash);
+          const step = parseInt(key.substring(lastDash + 1), 10);
+          const duration = activeNotes[key];
+          if (duration) {
+            if (step < minStep) minStep = step;
+            notes.push({ noteId, step, duration });
+          }
+        });
+        clipboardRef.current = notes.map(n => ({
+          noteId: n.noteId,
+          stepOffset: n.step - minStep,
+          duration: n.duration
+        }));
+        // Then delete
+        setActiveNotes(prev => {
+          const updated = { ...prev };
+          selectedNotes.forEach(key => delete updated[key]);
+          return updated;
+        });
+        setSelectedNotes(new Set());
+      }
+
+      // Paste notes (Ctrl+V / Cmd+V)
+      if ((e.ctrlKey || e.metaKey) && e.key === 'v' && clipboardRef.current && clipboardRef.current.length > 0) {
+        e.preventDefault();
+        const pasteStep = currentStep % numSteps;
+        const newSelected = new Set();
+        setActiveNotes(prev => {
+          const updated = { ...prev };
+          clipboardRef.current.forEach(({ noteId, stepOffset, duration }) => {
+            const key = `${noteId}-${pasteStep + stepOffset}`;
+            updated[key] = duration;
+            newSelected.add(key);
+          });
+          return updated;
+        });
+        setSelectedNotes(newSelected);
+        if (!selectionMode) setSelectionMode(true);
+      }
+
       // Toggle selection mode with 'S' key
       if (e.key === 's' || e.key === 'S') {
         if (!e.ctrlKey && !e.metaKey && document.activeElement.tagName !== 'INPUT') {
@@ -535,7 +606,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedNotes, selectionMode, activeNotes]);
+  }, [selectedNotes, selectionMode, activeNotes, currentStep, numSteps]);
 
   // --- Audio Engine ---
   const initAudio = () => {

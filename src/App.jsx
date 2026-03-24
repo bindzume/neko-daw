@@ -232,6 +232,13 @@ export default function App() {
   // --- Drag & Drop State ---
   const [dragAction, setDragAction] = useState(null);
 
+  // --- Selection Tool State ---
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedNotes, setSelectedNotes] = useState(new Set());
+  const [selectionBox, setSelectionBox] = useState(null); // { startX, startY, endX, endY }
+  const [isDraggingSelection, setIsDraggingSelection] = useState(false);
+  const [selectionDragStart, setSelectionDragStart] = useState(null); // { x, y, originalNotes: Map<key, {noteId, step, duration, noteIndex}> }
+
   // --- Project Management State ---
   const [currentProjectId, setCurrentProjectId] = useState(null);
   const [projectList, setProjectList] = useState([]);
@@ -449,6 +456,49 @@ export default function App() {
     return () => clearTimeout(autoSaveTimeout);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeNotes, bpm, timeSignature, volume, selectedKey, selectedScale, waveform, drawMode]);
+
+  // --- Keyboard Shortcuts ---
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      // Delete selected notes
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedNotes.size > 0) {
+        e.preventDefault();
+        setActiveNotes(prev => {
+          const updated = { ...prev };
+          selectedNotes.forEach(key => delete updated[key]);
+          return updated;
+        });
+        setSelectedNotes(new Set());
+      }
+
+      // Escape to clear selection or exit selection mode
+      if (e.key === 'Escape') {
+        setSelectedNotes(new Set());
+        setSelectionBox(null);
+        if (selectionMode) setSelectionMode(false);
+      }
+
+      // Ctrl+A / Cmd+A to select all notes
+      if ((e.ctrlKey || e.metaKey) && e.key === 'a' && selectionMode) {
+        e.preventDefault();
+        setSelectedNotes(new Set(Object.keys(activeNotes)));
+      }
+
+      // Toggle selection mode with 'S' key
+      if (e.key === 's' || e.key === 'S') {
+        if (!e.ctrlKey && !e.metaKey && document.activeElement.tagName !== 'INPUT') {
+          e.preventDefault();
+          setSelectionMode(prev => !prev);
+          if (!selectionMode) {
+            setSelectedNotes(new Set());
+          }
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedNotes, selectionMode, activeNotes]);
 
   // --- Audio Engine ---
   const initAudio = () => {
@@ -784,62 +834,162 @@ const stopPlayback = () => {
     e.target.value = '';
   };
 
-  // --- Drag & Draw Handlers ---
+  // --- Selection & Drag Handlers ---
   useEffect(() => {
     const handlePointerMove = (e) => {
-      if (!dragAction || !gridRef.current) return;
-      
+      if (!gridRef.current) return;
       const rect = gridRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left;
-      
-      // Calculate unbounded step to allow drag past current grid edges (which expands it)
-      const stepIndex = Math.max(0, Math.floor(x / 40));
-      const newDuration = Math.max(1, stepIndex - dragAction.startStep + 1);
-      
-      setActiveNotes(prev => {
-        const updated = { ...prev };
-        let changed = false;
-        dragAction.notes.forEach(noteId => {
-          const key = `${noteId}-${dragAction.startStep}`;
-          if (updated[key] !== newDuration) {
-            updated[key] = newDuration;
-            changed = true;
-          }
+      const y = e.clientY - rect.top;
+
+      // Handle selection box dragging
+      if (selectionBox && !isDraggingSelection) {
+        setSelectionBox(prev => ({ ...prev, endX: x, endY: y }));
+        return;
+      }
+
+      // Handle group dragging of selected notes
+      if (isDraggingSelection && selectionDragStart && selectionDragStart.originalNotes) {
+        const deltaSteps = Math.round((x - selectionDragStart.x) / 40);
+        const deltaNotes = Math.round((y - selectionDragStart.y) / 32); // 32px per note row (positive = down)
+
+        // Use the original notes stored when drag started
+        const originalNotes = selectionDragStart.originalNotes;
+
+        // Calculate new positions
+        const newPositions = [];
+
+        originalNotes.forEach((info) => {
+          const newNoteIndex = Math.max(0, Math.min(ALL_NOTES.length - 1, info.noteIndex + deltaNotes));
+          const newNoteId = ALL_NOTES[newNoteIndex].id;
+          const newStep = Math.max(0, info.step + deltaSteps);
+          const newKey = `${newNoteId}-${newStep}`;
+
+          newPositions.push({ key: newKey, duration: info.duration });
         });
-        return changed ? updated : prev;
-      });
+
+        // Move all dragged notes
+        setActiveNotes(prev => {
+          const updated = { ...prev };
+
+          // Remove ALL currently selected notes (at their current positions)
+          selectedNotes.forEach(key => {
+            delete updated[key];
+          });
+
+          // Add notes at new positions
+          newPositions.forEach(({ key, duration }) => {
+            updated[key] = duration;
+          });
+
+          return updated;
+        });
+
+        // Update selected notes to new positions
+        setSelectedNotes(() => {
+          const newSelected = new Set();
+          newPositions.forEach(({ key }) => {
+            newSelected.add(key);
+          });
+          return newSelected;
+        });
+
+        // DON'T update drag start - keep the original position for delta calculation
+        return;
+      }
+
+      // Handle normal note duration dragging
+      if (dragAction) {
+        const stepIndex = Math.max(0, Math.floor(x / 40));
+        const newDuration = Math.max(1, stepIndex - dragAction.startStep + 1);
+
+        setActiveNotes(prev => {
+          const updated = { ...prev };
+          let changed = false;
+          dragAction.notes.forEach(noteId => {
+            const key = `${noteId}-${dragAction.startStep}`;
+            if (updated[key] !== newDuration) {
+              updated[key] = newDuration;
+              changed = true;
+            }
+          });
+          return changed ? updated : prev;
+        });
+      }
     };
 
     const handlePointerUp = () => {
+      // Finalize selection box
+      if (selectionBox && !isDraggingSelection) {
+        const { startX, startY, endX, endY } = selectionBox;
+        const minX = Math.min(startX, endX);
+        const maxX = Math.max(startX, endX);
+        const minY = Math.min(startY, endY);
+        const maxY = Math.max(startY, endY);
+
+        const selected = new Set();
+        Object.keys(activeNotes).forEach(key => {
+          const [noteId, stepStr] = key.split('-');
+          const step = parseInt(stepStr, 10);
+          const duration = activeNotes[key];
+          const noteIndex = ALL_NOTES.findIndex(n => n.id === noteId);
+
+          const noteX = step * 40;
+          const noteY = noteIndex * 32;
+          const noteWidth = duration * 40;
+          const noteHeight = 32;
+
+          // Check if note overlaps with selection box
+          if (noteX < maxX && noteX + noteWidth > minX &&
+              noteY < maxY && noteY + noteHeight > minY) {
+            selected.add(key);
+          }
+        });
+
+        setSelectedNotes(selected);
+        setSelectionBox(null);
+      }
+
       if (dragAction) setDragAction(null);
+      if (isDraggingSelection) {
+        setIsDraggingSelection(false);
+        setSelectionDragStart(null);
+      }
     };
 
-    if (dragAction) {
-      window.addEventListener('pointermove', handlePointerMove);
-      window.addEventListener('pointerup', handlePointerUp);
-    }
-    
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+
     return () => {
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
     };
-  }, [dragAction]);
+  }, [dragAction, selectionBox, isDraggingSelection, selectionDragStart, selectedNotes, activeNotes]);
 
   const handleBackgroundDown = (noteId, stepIndex, e) => {
+    if (selectionMode) {
+      // In selection mode, start drawing a selection box
+      const rect = gridRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      setSelectionBox({ startX: x, startY: y, endX: x, endY: y });
+      return;
+    }
+
+    // Normal draw mode
     const targetNotes = getChordNotes(noteId);
     const newNotes = { ...activeNotes };
-    
+
     targetNotes.forEach(note => {
-      newNotes[`${note.id}-${stepIndex}`] = 1; 
+      newNotes[`${note.id}-${stepIndex}`] = 1;
     });
-    
+
     setActiveNotes(newNotes);
     setDragAction({ type: 'draw', notes: targetNotes.map(n => n.id), startStep: stepIndex });
-    setLastActionKey(`${noteId}-${stepIndex}`); // Track the latest note for AI suggestions
+    setLastActionKey(`${noteId}-${stepIndex}`);
 
     if (!isPlaying) {
       initAudio();
-      // FIX: Pass the precise current time as the third parameter
       const currentTime = audioCtxRef.current.currentTime;
       targetNotes.forEach(note => playOscillator(note.freq, 1, currentTime));
     }
@@ -852,11 +1002,55 @@ const stopPlayback = () => {
 
   const handleNoteBodyDown = (noteId, stepIndex, e) => {
     e.stopPropagation();
+
+    const noteKey = `${noteId}-${stepIndex}`;
+
+    if (selectionMode) {
+      // Get rect for drag start position
+      const rect = gridRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      // Determine which notes to drag
+      const notesToDrag = selectedNotes.has(noteKey) ? selectedNotes : new Set([noteKey]);
+
+      // Build originalNotes map with all the info we need
+      const originalNotes = new Map();
+      notesToDrag.forEach(key => {
+        const lastDashIndex = key.lastIndexOf('-');
+        const nId = key.substring(0, lastDashIndex);
+        const step = parseInt(key.substring(lastDashIndex + 1), 10);
+        const duration = activeNotes[key];
+        const noteIndex = ALL_NOTES.findIndex(n => n.id === nId);
+
+        if (duration && noteIndex !== -1) {
+          originalNotes.set(key, {
+            noteId: nId,
+            step,
+            duration,
+            noteIndex
+          });
+        }
+      });
+
+      // Update selection if we clicked on a non-selected note
+      if (!selectedNotes.has(noteKey)) {
+        setSelectedNotes(new Set([noteKey]));
+      }
+
+      // Start dragging
+      setIsDraggingSelection(true);
+      setSelectionDragStart({ x, y, originalNotes });
+      return;
+    }
+
+    // Normal mode: delete the note
     setActiveNotes(prev => {
       const updated = { ...prev };
-      delete updated[`${noteId}-${stepIndex}`];
+      delete updated[noteKey];
       return updated;
     });
+    setSelectedNotes(new Set()); // Clear selection when deleting
   };
 
   const handleNoteEdgeDown = (noteId, stepIndex, e) => {
@@ -1202,19 +1396,38 @@ const stopPlayback = () => {
         <div className="flex items-center gap-6">
           {/* Transport Controls */}
           <div className="flex items-center bg-gray-950 rounded-lg border border-gray-800 p-1">
-            <button 
+            <button
               onClick={togglePlay}
               className={`p-2 rounded-md flex items-center gap-2 transition-colors ${isPlaying ? 'bg-indigo-600 text-white' : 'hover:bg-gray-800 text-gray-400 hover:text-white'}`}
             >
               <Play className="w-4 h-4 fill-current" />
             </button>
-            <button 
+            <button
               onClick={stopPlayback}
               className="p-2 rounded-md hover:bg-gray-800 text-gray-400 hover:text-white transition-colors"
             >
               <Square className="w-4 h-4 fill-current" />
             </button>
           </div>
+
+          {/* Selection Mode Toggle */}
+          <button
+            onClick={() => {
+              setSelectionMode(!selectionMode);
+              if (selectionMode) setSelectedNotes(new Set());
+            }}
+            className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-all text-sm font-medium ${
+              selectionMode
+                ? 'bg-cyan-600/20 border-cyan-500/50 text-cyan-300 shadow-lg shadow-cyan-500/20'
+                : 'bg-gray-950 border-gray-700 text-gray-400 hover:bg-gray-800 hover:text-white'
+            }`}
+            title="Selection Tool (S)"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122" />
+            </svg>
+            {selectionMode ? 'Select Mode' : 'Draw Mode'}
+          </button>
 
           {/* Tempo, Time & Settings */}
           <div className="flex items-center gap-4 text-sm">
@@ -1427,13 +1640,30 @@ const stopPlayback = () => {
         </div>
         
         <div className="ml-auto text-xs flex items-center gap-4 text-gray-400">
-          {heatmapEnabled ? (
+          {selectionMode && selectedNotes.size > 0 && (
+            <>
+              <div className="flex items-center gap-2 bg-cyan-900/30 border border-cyan-500/50 px-3 py-1 rounded text-cyan-300 font-medium">
+                <span>{selectedNotes.size} note{selectedNotes.size !== 1 ? 's' : ''} selected</span>
+              </div>
+              <div className="text-[10px] text-gray-500">
+                <kbd className="px-1 py-0.5 bg-gray-800 rounded border border-gray-700">Del</kbd> Delete •
+                <kbd className="px-1 py-0.5 bg-gray-800 rounded border border-gray-700 ml-1">Esc</kbd> Clear
+              </div>
+            </>
+          )}
+          {selectionMode && selectedNotes.size === 0 && (
+            <div className="text-[10px] text-gray-500">
+              Drag to select • <kbd className="px-1 py-0.5 bg-gray-800 rounded border border-gray-700">S</kbd> Toggle mode • <kbd className="px-1 py-0.5 bg-gray-800 rounded border border-gray-700">Ctrl+A</kbd> Select all
+            </div>
+          )}
+          {!selectionMode && heatmapEnabled && (
             <>
               <div className="flex items-center gap-1"><div className="w-3 h-3 bg-indigo-500 border border-indigo-400 rounded-sm"></div> Downbeat</div>
               <div className="flex items-center gap-1"><div className="w-3 h-3 bg-teal-500 border border-teal-400 rounded-sm"></div> Upbeat</div>
               <div className="flex items-center gap-1"><div className="w-3 h-3 bg-amber-500 border border-amber-400 rounded-sm"></div> Syncopated</div>
             </>
-          ) : (
+          )}
+          {!selectionMode && !heatmapEnabled && (
             <>
               <span className="text-gray-500 font-semibold mr-2">Chord Quality:</span>
               <div className="flex items-center gap-1">
@@ -1536,10 +1766,23 @@ const stopPlayback = () => {
           {/* Grid Rows */}
           <div className="relative">
             {/* Playhead Marker */}
-            <div 
+            <div
               className="absolute top-0 bottom-0 bg-white/10 border-l border-white/30 z-30 pointer-events-none transition-all duration-75"
               style={{ width: '40px', left: `${visualStep * 40}px` }}
             />
+
+            {/* Selection Box */}
+            {selectionBox && (
+              <div
+                className="absolute border-2 border-cyan-400 bg-cyan-400/10 z-40 pointer-events-none"
+                style={{
+                  left: `${Math.min(selectionBox.startX, selectionBox.endX)}px`,
+                  top: `${Math.min(selectionBox.startY, selectionBox.endY)}px`,
+                  width: `${Math.abs(selectionBox.endX - selectionBox.startX)}px`,
+                  height: `${Math.abs(selectionBox.endY - selectionBox.startY)}px`
+                }}
+              />
+            )}
 
             {ALL_NOTES.map((note) => {
               const inScale = scaleNotes.includes(note.baseName);
@@ -1599,10 +1842,16 @@ const stopPlayback = () => {
                   {Array.from({ length: numSteps }).map((_, stepIndex) => {
                     const duration = activeNotes[`${note.id}-${stepIndex}`];
                     if (!duration) return null;
-                    
+
+                    const noteKey = `${note.id}-${stepIndex}`;
+                    const isSelected = selectedNotes.has(noteKey);
+
                     let noteColorClass = "bg-indigo-500 border-indigo-400"; // Default
-                    
-                    if (heatmapEnabled) {
+
+                    if (isSelected) {
+                      // Selected notes get a special cyan highlight
+                      noteColorClass = "bg-cyan-500 border-cyan-300 ring-2 ring-cyan-400 ring-offset-1 ring-offset-gray-950";
+                    } else if (heatmapEnabled) {
                       if (stepIndex % stepsPerBeat === 0) {
                         noteColorClass = "bg-indigo-500 border-indigo-400"; // Downbeat
                       } else if (stepIndex % (stepsPerBeat / 2) === 0) {
@@ -1611,18 +1860,22 @@ const stopPlayback = () => {
                         noteColorClass = "bg-amber-500 border-amber-400"; // Syncopated
                       }
                     }
-                    
+
                     return (
                       <div
                         key={`note-${note.id}-${stepIndex}`}
                         onPointerDown={(e) => handleNoteBodyDown(note.id, stepIndex, e)}
-                        className="absolute top-0 h-full p-[2px] cursor-pointer z-20 group"
-                        style={{ 
-                          left: `${stepIndex * 40}px`, 
-                          width: `${duration * 40}px` 
+                        className={`absolute top-0 h-full p-[2px] z-20 group ${
+                          selectionMode ? 'cursor-move' : 'cursor-pointer'
+                        } ${isSelected ? 'z-30' : ''}`}
+                        style={{
+                          left: `${stepIndex * 40}px`,
+                          width: `${duration * 40}px`
                         }}
                       >
-                        <div className={`w-full h-full rounded-sm shadow-[inset_0_0_10px_rgba(0,0,0,0.2)] border hover:brightness-110 transition-all opacity-90 relative overflow-hidden flex items-center px-1 ${noteColorClass}`}>
+                        <div className={`w-full h-full rounded-sm shadow-[inset_0_0_10px_rgba(0,0,0,0.2)] border hover:brightness-110 transition-all relative overflow-hidden flex items-center px-1 ${noteColorClass} ${
+                          isSelected ? 'opacity-100 scale-[1.02]' : 'opacity-90'
+                        }`}>
                           
                           {/* Duration Text */}
                           {getDurationLabel(duration, stepsPerBar) && (

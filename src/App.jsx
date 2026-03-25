@@ -1267,34 +1267,38 @@ const stopPlayback = () => {
   const exportToMidi = () => {
     const { activeNotes, bpm } = stateRef.current;
     const track = new MidiWriter.Track();
-    track.addEvent(new MidiWriter.TempoEvent({ bpm: bpm }));
+    // Use setTempo instead of TempoEvent — TempoEvent doesn't set a tick
+    // property, which corrupts the library's delta-time calculations and
+    // pushes the first notes off their correct positions.
+    track.setTempo(bpm);
 
     // midi-writer-js uses ticks. Standard is 128 ticks per beat.
-    // Our grid is 16th notes (4 steps per beat). 
+    // Our grid is 16th notes (4 steps per beat).
     // Therefore, 1 step = 128 / 4 = 32 ticks.
     const TICKS_PER_STEP = 32;
 
-    const events = [];
-
-    // Parse our dictionary into an array of events
+    // Parse notes and sort by step position so events are added in order
+    const parsed = [];
     Object.entries(activeNotes).forEach(([key, durationSteps]) => {
-      const [noteId, stepIndexStr] = key.split('-');
-      const stepIndex = parseInt(stepIndexStr);
-      
-      // Note IDs are like "C4", "F#5". We can pass these directly to midi-writer!
-      events.push(new MidiWriter.NoteEvent({
+      const lastDash = key.lastIndexOf('-');
+      const noteId = key.substring(0, lastDash);
+      const stepIndex = parseInt(key.substring(lastDash + 1));
+      parsed.push({ noteId, stepIndex, durationSteps });
+    });
+    parsed.sort((a, b) => a.stepIndex - b.stepIndex);
+
+    parsed.forEach(({ noteId, stepIndex, durationSteps }) => {
+      track.addEvent(new MidiWriter.NoteEvent({
         pitch: [noteId],
         duration: `T${durationSteps * TICKS_PER_STEP}`,
         startTick: stepIndex * TICKS_PER_STEP,
-        velocity: 80 // Default medium velocity
+        velocity: 80
       }));
     });
 
-    track.addEvent(events);
-
     const write = new MidiWriter.Writer(track);
     const dataUri = write.dataUri();
-    
+
     // Trigger Download
     const link = document.createElement('a');
     link.href = dataUri;

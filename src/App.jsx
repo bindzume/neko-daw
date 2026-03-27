@@ -254,6 +254,9 @@ export default function App() {
   const [loopRegion, setLoopRegion] = useState(null); // { start, end } step indices
   const [loopEnabled, setLoopEnabled] = useState(false);
 
+  // --- Song End Marker ---
+  const [songEndStep, setSongEndStep] = useState(null); // step index where the song ends, or null
+
   // --- Project Management State ---
   const [currentProjectId, setCurrentProjectId] = useState(null);
   const [projectList, setProjectList] = useState([]);
@@ -324,10 +327,10 @@ export default function App() {
   const currentAudioStepRef = useRef(0);
   
   // Keep mutable state in refs for the audio loop to avoid dependency cycle restarts
-  const stateRef = useRef({ activeNotes, waveform, volume, bpm, numSteps, stepsPerBeat, loopRegion, loopEnabled });
+  const stateRef = useRef({ activeNotes, waveform, volume, bpm, numSteps, stepsPerBeat, loopRegion, loopEnabled, songEndStep });
   useEffect(() => {
-    stateRef.current = { activeNotes, waveform, volume, bpm, numSteps, stepsPerBeat, loopRegion, loopEnabled };
-  }, [activeNotes, waveform, volume, bpm, numSteps, stepsPerBeat, loopRegion, loopEnabled]);
+    stateRef.current = { activeNotes, waveform, volume, bpm, numSteps, stepsPerBeat, loopRegion, loopEnabled, songEndStep };
+  }, [activeNotes, waveform, volume, bpm, numSteps, stepsPerBeat, loopRegion, loopEnabled, songEndStep]);
 
   // --- Undo/Redo ---
   const MAX_HISTORY = 50;
@@ -395,7 +398,8 @@ export default function App() {
     selectedKey,
     selectedScale,
     waveform,
-    drawMode
+    drawMode,
+    songEndStep
   });
 
   const saveCurrentProject = (projectId = currentProjectId, projectName = null) => {
@@ -454,6 +458,7 @@ export default function App() {
     setSelectedScale(data.selectedScale || 'Major');
     setWaveform(data.waveform || 'triangle');
     setDrawMode(data.drawMode || 'Single Note');
+    setSongEndStep(data.songEndStep || null);
 
     setCurrentProjectId(projectId);
     localStorage.setItem(CURRENT_PROJECT_KEY, projectId);
@@ -484,6 +489,7 @@ export default function App() {
     setSelectedScale('Major');
     setWaveform('triangle');
     setDrawMode('Single Note');
+    setSongEndStep(null);
     setLastActionKey(null);
 
     setCurrentProjectId(null);
@@ -533,7 +539,7 @@ export default function App() {
 
     return () => clearTimeout(autoSaveTimeout);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeNotes, bpm, timeSignature, volume, selectedKey, selectedScale, waveform, drawMode]);
+  }, [activeNotes, bpm, timeSignature, volume, selectedKey, selectedScale, waveform, drawMode, songEndStep]);
 
   // --- Keyboard Shortcuts ---
   useEffect(() => {
@@ -764,8 +770,12 @@ export default function App() {
           const nextStep = stepToPlay + 1;
           const lr = stateRef.current.loopRegion;
           const le = stateRef.current.loopEnabled;
+          const endMarker = stateRef.current.songEndStep;
           if (le && lr && nextStep >= lr.end) {
             currentAudioStepRef.current = lr.start;
+          } else if (endMarker !== null && nextStep >= endMarker) {
+            // Song end marker reached — wrap back to start
+            currentAudioStepRef.current = 0;
           } else {
             currentAudioStepRef.current = nextStep % currentNumSteps;
           }
@@ -858,6 +868,7 @@ const stopPlayback = () => {
         if (data.selectedScale) setSelectedScale(data.selectedScale);
         if (data.waveform) setWaveform(data.waveform);
         if (data.drawMode) setDrawMode(data.drawMode);
+        setSongEndStep(data.songEndStep || null);
 
         // Create a new project with the imported data
         const fileName = file.name.replace('.json', '');
@@ -1265,17 +1276,12 @@ const stopPlayback = () => {
   };
 
   const exportToMidi = () => {
-    const { activeNotes, bpm } = stateRef.current;
+    const { activeNotes, bpm, songEndStep } = stateRef.current;
     const track = new MidiWriter.Track();
-    // Use setTempo instead of TempoEvent — TempoEvent doesn't set a tick
-    // property, which corrupts the library's delta-time calculations and
-    // pushes the first notes off their correct positions.
     track.setTempo(bpm);
 
-    // midi-writer-js uses ticks. Standard is 128 ticks per beat.
-    // Our grid is 16th notes (4 steps per beat).
-    // Therefore, 1 step = 128 / 4 = 32 ticks.
     const TICKS_PER_STEP = 32;
+    const endStep = songEndStep; // null means export all notes
 
     // Parse notes and sort by step position so events are added in order
     const parsed = [];
@@ -1283,7 +1289,11 @@ const stopPlayback = () => {
       const lastDash = key.lastIndexOf('-');
       const noteId = key.substring(0, lastDash);
       const stepIndex = parseInt(key.substring(lastDash + 1));
-      parsed.push({ noteId, stepIndex, durationSteps });
+      // Skip notes that start at or after the end marker
+      if (endStep !== null && stepIndex >= endStep) return;
+      // Clamp duration to not exceed the end marker
+      const clampedDuration = endStep !== null ? Math.min(durationSteps, endStep - stepIndex) : durationSteps;
+      parsed.push({ noteId, stepIndex, durationSteps: clampedDuration });
     });
     parsed.sort((a, b) => a.stepIndex - b.stepIndex);
 
@@ -1307,13 +1317,17 @@ const stopPlayback = () => {
   };
 
   const exportToWav = async () => {
-    const { activeNotes, bpm, waveform } = stateRef.current;
-    
+    const { activeNotes, bpm, waveform, songEndStep } = stateRef.current;
+
     // 1. Calculate total song length
     let maxStep = 0;
     Object.entries(activeNotes).forEach(([key, duration]) => {
-      const step = parseInt(key.split('-')[1]);
-      if (step + duration > maxStep) maxStep = step + duration;
+      const lastDash = key.lastIndexOf('-');
+      const step = parseInt(key.substring(lastDash + 1));
+      const noteEnd = step + duration;
+      // Respect end marker
+      const clampedEnd = songEndStep !== null ? Math.min(noteEnd, songEndStep) : noteEnd;
+      if (step < (songEndStep ?? Infinity) && clampedEnd > maxStep) maxStep = clampedEnd;
     });
 
     if (maxStep === 0) return alert("Nothing to export!");
@@ -1328,14 +1342,20 @@ const stopPlayback = () => {
 
     // 3. Schedule all notes onto the offline context
     Object.entries(activeNotes).forEach(([key, durationSteps]) => {
-      const [noteId, stepIndexStr] = key.split('-');
-      const stepIndex = parseInt(stepIndexStr);
-      
+      const lastDash = key.lastIndexOf('-');
+      const noteId = key.substring(0, lastDash);
+      const stepIndex = parseInt(key.substring(lastDash + 1));
+
+      // Skip notes that start at or after the end marker
+      if (songEndStep !== null && stepIndex >= songEndStep) return;
+      // Clamp duration to not exceed the end marker
+      const clampedDuration = songEndStep !== null ? Math.min(durationSteps, songEndStep - stepIndex) : durationSteps;
+
       const noteObj = ALL_NOTES.find(n => n.id === noteId);
       if (!noteObj) return;
 
       const startTime = stepIndex * stepTimeSecs;
-      const durationSecs = durationSteps * stepTimeSecs;
+      const durationSecs = clampedDuration * stepTimeSecs;
 
       // Replicate the exact synth envelope from playOscillator()
       const osc = offlineCtx.createOscillator();
@@ -1995,7 +2015,12 @@ const stopPlayback = () => {
               const rect = e.currentTarget.getBoundingClientRect();
               const stepIndex = Math.floor((e.clientX - rect.left) / 40);
               if (stepIndex >= 0 && stepIndex < numSteps) {
-                if (e.shiftKey) {
+                if (e.option || e.altKey) {
+                  // Alt+click: set or clear song end marker
+                  // Snap to nearest bar boundary
+                  const snapped = Math.round(stepIndex / stepsPerBar) * stepsPerBar;
+                  setSongEndStep(prev => prev === snapped ? null : (snapped || stepsPerBar));
+                } else if (e.shiftKey) {
                   // Shift+drag: set loop region
                   loopDragStartRef.current = stepIndex;
                   setLoopRegion({ start: stepIndex, end: stepIndex + 1 });
@@ -2028,6 +2053,16 @@ const stopPlayback = () => {
                 }}
               />
             )}
+            {/* Song end marker */}
+            {songEndStep !== null && (
+              <div
+                className="absolute top-0 bottom-0 z-20 pointer-events-none flex items-center"
+                style={{ left: `${songEndStep * 40 - 1}px` }}
+              >
+                <div className="w-0.5 h-full bg-red-500" />
+                <div className="absolute -top-0.5 -left-1.5 text-[8px] font-bold text-red-400 bg-red-950 border border-red-500/60 rounded px-0.5 leading-tight">END</div>
+              </div>
+            )}
             {/* Playback position highlight (ref-driven, no re-renders) */}
             <div
               ref={headerHighlightRef}
@@ -2059,6 +2094,20 @@ const stopPlayback = () => {
               className="absolute top-0 bottom-0 bg-white/10 border-l border-white/30 z-30 pointer-events-none"
               style={{ width: '40px', left: `${visualStep * 40}px` }}
             />
+
+            {/* Song end marker line + dimmed area */}
+            {songEndStep !== null && (
+              <>
+                <div
+                  className="absolute top-0 bottom-0 w-0.5 bg-red-500 pointer-events-none"
+                  style={{ left: `${songEndStep * 40 - 1}px`, zIndex: 35 }}
+                />
+                <div
+                  className="absolute top-0 bottom-0 bg-black/40 pointer-events-none"
+                  style={{ left: `${songEndStep * 40}px`, right: 0, zIndex: 4 }}
+                />
+              </>
+            )}
 
             {/* Loop region overlay */}
             {loopEnabled && loopRegion && (

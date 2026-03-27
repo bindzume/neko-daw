@@ -9,18 +9,90 @@ const INTERVAL_ROMANS = {
   0: 'I', 1: '♭II', 2: 'II', 3: '♭III', 4: 'III', 5: 'IV', 6: '♭V', 7: 'V', 8: '♭VI', 9: 'VI', 10: '♭VII', 11: 'VII'
 };
 
+// Calculate chord quality for a given scale degree
+const getChordQuality = (scaleIntervals, degreeIndex) => {
+  if (scaleIntervals.length < 3) return null;
+
+  // Get the intervals for root, third (2 steps up), and fifth (4 steps up)
+  const rootInterval = scaleIntervals[degreeIndex];
+  const thirdInterval = scaleIntervals[(degreeIndex + 2) % scaleIntervals.length];
+  const fifthInterval = scaleIntervals[(degreeIndex + 4) % scaleIntervals.length];
+
+  // Calculate semitone distances
+  const thirdDistance = (thirdInterval - rootInterval + 12) % 12;
+  const fifthDistance = (fifthInterval - rootInterval + 12) % 12;
+
+  // Determine quality based on intervals
+  if (fifthDistance === 6) return 'dim'; // diminished fifth
+  if (fifthDistance === 8) return 'aug'; // augmented fifth
+  if (fifthDistance === 7) {
+    // Perfect fifth - check the third
+    if (thirdDistance === 4) return 'maj';
+    if (thirdDistance === 3) return 'min';
+  }
+
+  return null;
+};
+
+// Roman numeral formatting based on chord quality
+const formatRomanNumeral = (degree, quality) => {
+  const numerals = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII'];
+  const base = numerals[degree];
+
+  if (quality === 'maj') return base; // Uppercase for major
+  if (quality === 'min') return base.toLowerCase(); // Lowercase for minor
+  if (quality === 'dim') return base.toLowerCase() + '°'; // Lowercase with circle
+  if (quality === 'aug') return base + '+'; // Uppercase with plus
+
+  return base;
+};
+
 const SCALES = {
-  'Major': [0, 2, 4, 5, 7, 9, 11],
-  'Minor (Natural)': [0, 2, 3, 5, 7, 8, 10],
-  'Harmonic Minor': [0, 2, 3, 5, 7, 8, 11],
-  'Melodic Minor': [0, 2, 3, 5, 7, 9, 11],
-  'Dorian': [0, 2, 3, 5, 7, 9, 10],
-  'Phrygian': [0, 1, 3, 5, 7, 8, 10],
-  'Lydian': [0, 2, 4, 6, 7, 9, 11],
-  'Mixolydian': [0, 2, 4, 5, 7, 9, 10],
-  'Pentatonic Major': [0, 2, 4, 7, 9],
-  'Pentatonic Minor': [0, 3, 5, 7, 10],
-  'Blues': [0, 3, 5, 6, 7, 10],
+  'Major': { 
+    intervals: [0, 2, 4, 5, 7, 9, 11], 
+    emoji: '☀️', 
+    feeling: 'Happy, Heroic, Bright' 
+  },
+  'Minor (Natural)': { 
+    intervals: [0, 2, 3, 5, 7, 8, 10], 
+    emoji: '🌙', 
+    feeling: 'Sad, Serious, Pensive' 
+  },
+  'Harmonic Minor': { 
+    intervals: [0, 2, 3, 5, 7, 8, 11], 
+    emoji: '🕌', 
+    feeling: 'Exotic, Dark, Mystical' 
+  },
+  'Melodic Minor': { 
+    intervals: [0, 2, 3, 5, 7, 9, 11], 
+    emoji: '🎭', 
+    feeling: 'Sophisticated, Jazz, Elegant' 
+  },
+  'Dorian': { 
+    intervals: [0, 2, 3, 5, 7, 9, 10], 
+    emoji: '🌊', 
+    feeling: 'Cool, Medieval, Chill' 
+  },
+  'Phrygian': { 
+    intervals: [0, 1, 3, 5, 7, 8, 10], 
+    emoji: '🌋', 
+    feeling: 'Aggressive, Tense, Metal' 
+  },
+  'Lydian': { 
+    intervals: [0, 2, 4, 6, 7, 9, 11], 
+    emoji: '✨', 
+    feeling: 'Dreamy, Spacey, Ethereal' 
+  },
+  'Mixolydian': { 
+    intervals: [0, 2, 4, 5, 7, 9, 10], 
+    emoji: '🎸', 
+    feeling: 'Bluesy, Positive, Rock' 
+  },
+  'Locrian': { 
+    intervals: [0, 1, 3, 5, 6, 8, 10], 
+    emoji: '💀', 
+    feeling: 'Unstable, Chaotic, Horror' 
+  }
 };
 
 const DRAW_MODES = {
@@ -390,11 +462,30 @@ const stopPlayback = () => {
   };
 
   // --- Scale Logic ---
-  const scaleNotes = useMemo(() => {
-    const rootIndex = BASE_NOTES.indexOf(selectedKey);
-    const intervals = SCALES[selectedScale];
-    return intervals.map(interval => BASE_NOTES[(rootIndex + interval) % 12]);
+ const scaleNotes = useMemo(() => {
+    // Access .intervals since SCALES is now an object
+    return SCALES[selectedScale].intervals.map(interval => {
+      const noteIndex = (BASE_NOTES.indexOf(selectedKey) + interval) % 12;
+      return BASE_NOTES[noteIndex];
+    });
   }, [selectedKey, selectedScale]);
+
+  // Calculate chord qualities for each scale degree
+  const scaleChordQualities = useMemo(() => {
+    const scaleIntervals = SCALES[selectedScale].intervals;
+    const qualities = {};
+
+    scaleNotes.forEach((noteName, index) => {
+      const quality = getChordQuality(scaleIntervals, index);
+      qualities[noteName] = {
+        degree: index,
+        quality: quality,
+        roman: formatRomanNumeral(index, quality)
+      };
+    });
+
+    return qualities;
+  }, [selectedScale, scaleNotes]);
 
   // --- Chord & Placement Logic ---
   const getChordNotes = (clickedNoteId) => {
@@ -962,12 +1053,16 @@ const stopPlayback = () => {
         <div className="flex items-center gap-2">
           <span className="text-gray-400">Scale:</span>
           <select 
-            value={selectedScale}
-            onChange={(e) => setSelectedScale(e.target.value)}
-            className="bg-gray-900 border border-gray-700 rounded px-2 py-1 focus:outline-none focus:border-indigo-500"
-          >
-            {Object.keys(SCALES).map(scale => <option key={scale} value={scale}>{scale}</option>)}
-          </select>
+  value={selectedScale} 
+  onChange={(e) => setSelectedScale(e.target.value)}
+  className="bg-slate-800 text-white text-sm rounded px-2 py-1 border border-slate-700"
+>
+  {Object.keys(SCALES).map(scaleName => (
+    <option key={scaleName} value={scaleName}>
+      {SCALES[scaleName].emoji} {scaleName} — {SCALES[scaleName].feeling}
+    </option>
+  ))}
+</select>
         </div>
 
         <div className="w-px h-5 bg-gray-700 mx-2"></div>
@@ -1042,9 +1137,19 @@ const stopPlayback = () => {
             </>
           ) : (
             <>
-              <div className="flex items-center gap-1"><div className="w-3 h-3 bg-indigo-900/60 border border-indigo-500/50 rounded-sm"></div> Root Note</div>
-              <div className="flex items-center gap-1"><div className="w-3 h-3 bg-slate-700 rounded-sm border border-slate-600"></div> In Scale</div>
-              <div className="flex items-center gap-1"><div className="w-3 h-3 bg-gray-950 rounded-sm border border-gray-900"></div> Out of Scale</div>
+              <span className="text-gray-500 font-semibold mr-2">Chord Quality:</span>
+              <div className="flex items-center gap-1">
+                <span className="text-emerald-400 font-bold text-sm">I</span> Major
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="text-blue-400 font-bold text-sm">ii</span> Minor
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="text-rose-400 font-bold text-sm">vii°</span> Diminished
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="text-amber-400 font-bold text-sm">III+</span> Augmented
+              </div>
             </>
           )}
         </div>
@@ -1061,16 +1166,29 @@ const stopPlayback = () => {
             const isBlack = note.baseName.includes('#');
             const inScale = scaleNotes.includes(note.baseName);
             const isRoot = note.baseName === selectedKey;
-            
-            // Calculate scale degree relative to root
-            const rootIndex = BASE_NOTES.indexOf(selectedKey);
-            const noteIndex = BASE_NOTES.indexOf(note.baseName);
-            const interval = (noteIndex - rootIndex + 12) % 12;
-            const roman = INTERVAL_ROMANS[interval];
-            
+
+            // Get chord quality info for this note
+            const chordInfo = scaleChordQualities[note.baseName];
+            const displayRoman = chordInfo?.roman || '';
+            const chordQuality = chordInfo?.quality;
+
+            // Color coding based on chord quality
+            const getQualityColor = () => {
+              if (isRoot) return 'text-indigo-500';
+              if (!chordQuality) return 'text-current opacity-40';
+
+              switch(chordQuality) {
+                case 'maj': return 'text-emerald-400';
+                case 'min': return 'text-blue-400';
+                case 'dim': return 'text-rose-400';
+                case 'aug': return 'text-amber-400';
+                default: return 'text-current opacity-40';
+              }
+            };
+
             return (
-              <div 
-                key={`key-${note.id}`} 
+              <div
+                key={`key-${note.id}`}
                 className={`flex items-center justify-end pr-2 text-xs border-b border-gray-800 h-8 shrink-0 transition-colors duration-100 relative
                   ${isBlack ? 'bg-gray-950 text-gray-500' : 'bg-gray-200 text-gray-800'}
                   ${isRoot ? (isBlack ? 'border-l-4 border-l-indigo-500 !bg-indigo-950' : 'border-l-4 border-l-indigo-500 !bg-indigo-100') : ''}
@@ -1080,11 +1198,11 @@ const stopPlayback = () => {
                 {note.baseName === 'C' && (
                   <span className="absolute left-1 text-[10px] font-bold opacity-50">C{note.octave}</span>
                 )}
-                
+
                 <div className="flex items-center gap-1.5">
                   {inScale && (
-                    <span className={`text-[9px] font-bold ${isRoot ? 'text-indigo-500' : 'text-current opacity-40'}`}>
-                      {roman}
+                    <span className={`text-[9px] font-bold ${getQualityColor()}`}>
+                      {displayRoman}
                     </span>
                   )}
                   <span className={`font-medium w-5 text-right ${isRoot ? 'text-indigo-600' : ''}`}>{note.name}</span>

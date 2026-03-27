@@ -1598,8 +1598,8 @@ const stopPlayback = () => {
       )}
 
       {/* Header & Controls */}
-      <header className="flex items-center justify-between px-6 py-4 bg-gray-900 border-b border-gray-800 shrink-0">
-        <div className="flex items-center gap-4">
+      <header className="flex items-center justify-between px-6 py-4 bg-gray-900 border-b border-gray-800 shrink-0 overflow-x-auto">
+        <div className="flex items-center gap-4 shrink-0">
           <div className="bg-indigo-600 p-2 rounded-lg">
             <Music className="w-5 h-5 text-white" />
           </div>
@@ -1623,7 +1623,7 @@ const stopPlayback = () => {
           </div>
         </div>
 
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-6 shrink-0">
           {/* Transport Controls */}
           <div className="flex items-center bg-gray-950 rounded-lg border border-gray-800 p-1">
             <button
@@ -1809,7 +1809,7 @@ const stopPlayback = () => {
       </header>
 
       {/* Theory & Scale Toolbar */}
-      <div className="flex items-center px-6 py-2 bg-gray-800 border-b border-gray-700 shrink-0 gap-6 text-sm flex-wrap">
+      <div className="flex items-center px-6 py-2 bg-gray-800 border-b border-gray-700 shrink-0 gap-6 text-sm overflow-x-auto">
         <div className="flex items-center gap-2">
           <Settings2 className="w-4 h-4 text-indigo-400" />
           <span className="font-semibold text-gray-300">Scale Highlight:</span>
@@ -1904,7 +1904,7 @@ const stopPlayback = () => {
           </span>
         </div>
         
-        <div className="ml-auto text-xs flex items-center gap-4 text-gray-400">
+        <div className="ml-auto text-xs flex items-center gap-4 text-gray-400 shrink-0 whitespace-nowrap">
           {selectionMode && selectedNotes.size > 0 && (
             <>
               <div className="flex items-center gap-2 bg-cyan-900/30 border border-cyan-500/50 px-3 py-1 rounded text-cyan-300 font-medium">

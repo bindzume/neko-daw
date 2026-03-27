@@ -1,0 +1,16 @@
+{
+  "bpm": 90,
+  "timeSignature": "4/4",
+  "volume": 0.5,
+  "selectedKey": "C",
+  "selectedScale": "Major",
+  "waveform": "sine",
+  "drawMode": "Single Note",
+  "activeNotes": {
+    "G3-0": 16, "B3-0": 16, "D4-0": 16,
+    "C4-16": 16, "E4-16": 16, "G4-16": 16,
+
+    "G3-48": 16, "B3-48": 16, "D4-48": 16, "F4-48": 16,
+    "C3-64": 16, "C4-64": 16, "E4-64": 16, "G4-64": 16
+  }
+}

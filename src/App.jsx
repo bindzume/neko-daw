@@ -1,8 +1,13 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Play, Square, Trash2, Volume2, Music, Waves, Settings2, Download, Upload } from 'lucide-react';
+import MidiWriter from 'midi-writer-js';
 
 // --- Music Theory & Constants ---
 const BASE_NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+const INTERVAL_ROMANS = {
+  0: 'I', 1: '♭II', 2: 'II', 3: '♭III', 4: 'III', 5: 'IV', 6: '♭V', 7: 'V', 8: '♭VI', 9: 'VI', 10: '♭VII', 11: 'VII'
+};
 
 const SCALES = {
   'Major': [0, 2, 4, 5, 7, 9, 11],
@@ -57,6 +62,35 @@ const DRAW_MODE_GROUPS = Object.entries(DRAW_MODES).reduce((acc, [mode, data]) =
 const WAVEFORMS = ['sine', 'square', 'sawtooth', 'triangle'];
 const TIME_SIGNATURES = ['3/4', '4/4', '5/4', '6/8', '7/8'];
 
+const CHORD_DICTIONARY = {
+  '0,4,7': '',
+  '0,3,7': 'm',
+  '0,3,6': 'dim',
+  '0,4,8': 'aug',
+  '0,2,7': 'sus2',
+  '0,5,7': 'sus4',
+  '0,7': '5',
+  '0,4,7,11': 'maj7',
+  '0,3,7,10': 'm7',
+  '0,4,7,10': '7',
+  '0,3,6,9': 'dim7',
+  '0,3,6,10': 'm7b5',
+  '0,4,7,9': '6',
+  '0,3,7,9': 'm6'
+};
+
+const PROGRESSIONS = {
+  'Pop Punk (I-V-vi-IV)': [1, 5, 6, 4],
+  'Jazz Turnaround (ii-V-I)': [2, 5, 1],
+  'Doo-wop (I-vi-IV-V)': [1, 6, 4, 5],
+  'R&B / Neo-Soul (IV-V-iii-vi)': [4, 5, 3, 6],
+  'Epic / Soundtrack (vi-IV-I-V)': [6, 4, 1, 5],
+  'Classic Rock (I-IV-V)': [1, 4, 5],
+  'Pachelbel Canon (I-V-vi-iii-IV-I-IV-V)': [1, 5, 6, 3, 4, 1, 4, 5]
+};
+
+
+
 const getTimeSigConfig = (ts) => {
   const [beats, value] = ts.split('/').map(Number);
   const stepsPerBeat = 16 / value; // e.g., 4 -> 4 (16ths), 8 -> 2 (16ths)
@@ -100,6 +134,7 @@ const getDurationLabel = (steps, stepsPerBar) => {
 };
 
 export default function App() {
+  
   // --- State ---
   const [activeNotes, setActiveNotes] = useState({});
   const [isPlaying, setIsPlaying] = useState(false);
@@ -115,6 +150,13 @@ export default function App() {
   // --- Heatmap State ---
   const [heatmapEnabled, setHeatmapEnabled] = useState(true);
   
+  // --- AI Assist State ---
+  const [aiAssistEnabled, setAiAssistEnabled] = useState(false);
+  const [lastActionKey, setLastActionKey] = useState(null);
+  
+  // --- UI State ---
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+
   // --- Drag & Drop State ---
   const [dragAction, setDragAction] = useState(null);
 
@@ -147,9 +189,13 @@ export default function App() {
   // --- Refs for Audio & Interval ---
   const audioCtxRef = useRef(null);
   const masterGainRef = useRef(null);
-  const timerRef = useRef(null);
   const gridRef = useRef(null);
   const fileInputRef = useRef(null);
+  
+  // NEW REFS for Lookahead Scheduling
+  const scheduleIntervalRef = useRef(null);
+  const nextNoteTimeRef = useRef(0);
+  const currentAudioStepRef = useRef(0);
   
   // Keep mutable state in refs for the audio loop to avoid dependency cycle restarts
   const stateRef = useRef({ activeNotes, waveform, volume, bpm, numSteps });
@@ -170,7 +216,7 @@ export default function App() {
     }
   };
 
-  const playOscillator = (freq, durationSteps = 1) => {
+  const playOscillator = (freq, durationSteps = 1, startTime) => {
     if (!audioCtxRef.current) return;
     const ctx = audioCtxRef.current;
     
@@ -180,56 +226,86 @@ export default function App() {
     osc.type = stateRef.current.waveform;
     osc.frequency.value = freq;
     
-    // Calculate real duration based on BPM (1 step = 16th note)
+    // Calculate real duration based on BPM
     const stepTimeSecs = 60 / stateRef.current.bpm / 4;
     const durationSecs = durationSteps * stepTimeSecs;
     
-    // Envelope to avoid clicks and handle sustain
+    // Envelope
     const attack = 0.01;
     const release = 0.1;
     const sustainTime = Math.max(0, durationSecs - attack);
-    const now = ctx.currentTime;
     
-    noteGain.gain.setValueAtTime(0, now);
-    noteGain.gain.linearRampToValueAtTime(0.3, now + attack);
-    noteGain.gain.setValueAtTime(0.3, now + attack + sustainTime); // Sustain block
-    noteGain.gain.exponentialRampToValueAtTime(0.001, now + attack + sustainTime + release);
+    // Use the provided startTime, NOT ctx.currentTime
+    noteGain.gain.setValueAtTime(0, startTime);
+    noteGain.gain.linearRampToValueAtTime(0.3, startTime + attack);
+    noteGain.gain.setValueAtTime(0.3, startTime + attack + sustainTime);
+    noteGain.gain.exponentialRampToValueAtTime(0.001, startTime + attack + sustainTime + release);
     
     osc.connect(noteGain);
     noteGain.connect(masterGainRef.current);
     
-    osc.start(now);
-    osc.stop(now + durationSecs + release + 0.1);
+    osc.start(startTime);
+    osc.stop(startTime + durationSecs + release + 0.1);
   };
 
   // --- Playback Loop ---
+  // --- Playback Loop (Lookahead Scheduler) ---
   useEffect(() => {
     if (isPlaying) {
       initAudio();
-      const stepTime = (60 / bpm) / 4 * 1000; // 16th notes
+      const ctx = audioCtxRef.current;
       
-      timerRef.current = setInterval(() => {
-        setCurrentStep((prev) => {
-          const currentNumSteps = stateRef.current.numSteps;
-          const nextStep = (prev + 1) % currentNumSteps;
-          
-          // Play notes for the new step
+      const lookahead = 25.0; // How frequently to wake up (ms)
+      const scheduleAheadTime = 0.1; // How far ahead to schedule audio (sec)
+
+      // Reset the audio clock if starting fresh
+      if (nextNoteTimeRef.current === 0) {
+        nextNoteTimeRef.current = ctx.currentTime + 0.05;
+      }
+
+      const scheduler = () => {
+        const bpm = stateRef.current.bpm;
+        const stepTimeSecs = (60 / bpm) / 4;
+        const currentNumSteps = stateRef.current.numSteps;
+
+        // While there are notes that will need to play before the next interval,
+        // schedule them and advance the pointer.
+        while (nextNoteTimeRef.current < ctx.currentTime + scheduleAheadTime) {
+          const stepToPlay = currentAudioStepRef.current;
+          const timeToPlay = nextNoteTimeRef.current;
+
+          // 1. Schedule Audio (High Precision)
           ALL_NOTES.forEach((note) => {
-            const duration = stateRef.current.activeNotes[`${note.id}-${nextStep}`];
+            const duration = stateRef.current.activeNotes[`${note.id}-${stepToPlay}`];
             if (duration) {
-              playOscillator(note.freq, duration);
+              playOscillator(note.freq, duration, timeToPlay);
             }
           });
-          
-          return nextStep;
-        });
-      }, stepTime);
+
+          // 2. Schedule UI Update (Sync playhead visually)
+          const timeUntilPlayMs = (timeToPlay - ctx.currentTime) * 1000;
+          setTimeout(() => {
+            setCurrentStep(stepToPlay);
+          }, Math.max(0, timeUntilPlayMs));
+
+          // 3. Advance internal audio clock and step counter
+          nextNoteTimeRef.current += stepTimeSecs;
+          currentAudioStepRef.current = (stepToPlay + 1) % currentNumSteps;
+        }
+      };
+
+      scheduleIntervalRef.current = setInterval(scheduler, lookahead);
     } else {
-      clearInterval(timerRef.current);
+      if (scheduleIntervalRef.current) {
+        clearInterval(scheduleIntervalRef.current);
+      }
     }
 
-    return () => clearInterval(timerRef.current);
-  }, [isPlaying, bpm]);
+    return () => clearInterval(scheduleIntervalRef.current);
+  }, [isPlaying]); 
+  // Notice we removed 'bpm' from the dependency array! 
+  // Because the scheduler reads from stateRef.current.bpm, you can now 
+  // live-tweak the BPM slider while playing without audio glitching.
 
   // Update master volume
   useEffect(() => {
@@ -239,29 +315,32 @@ export default function App() {
   }, [volume]);
 
   // --- Interactions ---
-  const togglePlay = () => {
+const togglePlay = () => {
     if (!isPlaying) {
-      // If starting from stop, play the current visual step immediately
-      if (visualStep === 0) {
-        initAudio();
-        ALL_NOTES.forEach((note) => {
-          const duration = activeNotes[`${note.id}-0`];
-          if (duration) playOscillator(note.freq, duration);
-        });
-      }
+      // Sync the audio engine step to wherever the visual step currently is
+      currentAudioStepRef.current = currentStep;
+      // Force the audio clock to recalibrate to 'now'
+      nextNoteTimeRef.current = 0; 
     }
     setIsPlaying(!isPlaying);
   };
 
-  const stopPlayback = () => {
+const stopPlayback = () => {
     setIsPlaying(false);
     setCurrentStep(0);
+    // Reset internal audio pointers
+    currentAudioStepRef.current = 0;
+    nextNoteTimeRef.current = 0;
   };
 
   const clearGrid = () => {
-    if (window.confirm('Are you sure you want to clear all notes?')) {
-      setActiveNotes({});
-    }
+    setShowClearConfirm(true);
+  };
+
+  const confirmClear = () => {
+    setActiveNotes({});
+    setLastActionKey(null);
+    setShowClearConfirm(false);
   };
 
   // --- Export & Import ---
@@ -348,6 +427,96 @@ export default function App() {
     return targetNotes;
   };
 
+  // --- AI Suggestion Logic ---
+  const suggestedNotes = useMemo(() => {
+    if (!aiAssistEnabled || !lastActionKey) return [];
+    const duration = activeNotes[lastActionKey];
+    if (!duration) return [];
+
+    const [noteId, stepIndexStr] = lastActionKey.split('-');
+    const stepIndex = parseInt(stepIndexStr, 10);
+    const nextStep = stepIndex + duration;
+
+    // Get notes in current scale, ordered low to high
+    const diatonicNotesAsc = [...ALL_NOTES]
+      .sort((a, b) => a.midi - b.midi)
+      .filter(n => scaleNotes.includes(n.baseName));
+
+    const currentIndex = diatonicNotesAsc.findIndex(n => n.id === noteId);
+    if (currentIndex === -1) return [];
+
+    const suggestions = [];
+    const addSugg = (idx, label, type) => {
+      if (idx >= 0 && idx < diatonicNotesAsc.length) {
+        const sId = diatonicNotesAsc[idx].id;
+        // Only suggest if the spot is currently empty
+        if (!activeNotes[`${sId}-${nextStep}`]) {
+          suggestions.push({ id: sId, stepIndex: nextStep, duration, label, type });
+        }
+      }
+    };
+
+    // Voice Leading Rules applied:
+    addSugg(currentIndex + 1, 'Up', 'smooth');
+    addSugg(currentIndex - 1, 'Down', 'smooth');
+    addSugg(currentIndex + 2, '+3rd', 'leap');
+    addSugg(currentIndex - 2, '-3rd', 'leap');
+
+    return suggestions;
+  }, [aiAssistEnabled, lastActionKey, activeNotes, scaleNotes]);
+
+  // --- Progression Insertion ---
+  const insertProgression = (e) => {
+    const progressionName = e.target.value;
+    if (!progressionName) return;
+    
+    const degrees = PROGRESSIONS[progressionName];
+    if (!degrees) return;
+
+    const diatonicNotesAsc = [...ALL_NOTES]
+      .sort((a, b) => a.midi - b.midi)
+      .filter(n => scaleNotes.includes(n.baseName));
+    
+    // Start around octave 3 for chords
+    let rootNoteIdx = diatonicNotesAsc.findIndex(n => n.baseName === selectedKey && n.octave === 3);
+    if (rootNoteIdx === -1) rootNoteIdx = diatonicNotesAsc.findIndex(n => n.baseName === selectedKey);
+
+    // Find the last used bar to append to (or 0 if empty)
+    let maxStep = 0;
+    Object.entries(activeNotes).forEach(([key, duration]) => {
+      const stepIndex = parseInt(key.split('-').pop(), 10);
+      maxStep = Math.max(maxStep, stepIndex + duration);
+    });
+    const startStep = Math.ceil(maxStep / stepsPerBar) * stepsPerBar;
+
+    const newNotes = { ...activeNotes };
+    
+    degrees.forEach((degree, index) => {
+      // degree is 1-based index into the scale
+      const chordRootIdx = rootNoteIdx + (degree - 1);
+      const thirdIdx = chordRootIdx + 2;
+      const fifthIdx = chordRootIdx + 4;
+      
+      // Add a bass note one full octave down (scaleNotes.length steps down)
+      const bassIdx = chordRootIdx - scaleNotes.length;
+      
+      const stepPos = startStep + (index * stepsPerBar);
+
+      [bassIdx, chordRootIdx, thirdIdx, fifthIdx].forEach(idx => {
+        if (idx >= 0 && idx < diatonicNotesAsc.length) {
+          const note = diatonicNotesAsc[idx];
+          // Insert the chord with a full bar duration
+          newNotes[`${note.id}-${stepPos}`] = stepsPerBar; 
+        }
+      });
+    });
+
+    setActiveNotes(newNotes);
+    
+    // Reset the select dropdown
+    e.target.value = '';
+  };
+
   // --- Drag & Draw Handlers ---
   useEffect(() => {
     const handlePointerMove = (e) => {
@@ -399,11 +568,19 @@ export default function App() {
     
     setActiveNotes(newNotes);
     setDragAction({ type: 'draw', notes: targetNotes.map(n => n.id), startStep: stepIndex });
+    setLastActionKey(`${noteId}-${stepIndex}`); // Track the latest note for AI suggestions
 
     if (!isPlaying) {
       initAudio();
-      targetNotes.forEach(note => playOscillator(note.freq, 1));
+      // FIX: Pass the precise current time as the third parameter
+      const currentTime = audioCtxRef.current.currentTime;
+      targetNotes.forEach(note => playOscillator(note.freq, 1, currentTime));
     }
+  };
+
+  const handleSuggestionClick = (sugg, e) => {
+    e.stopPropagation();
+    handleBackgroundDown(sugg.id, sugg.stepIndex, e);
   };
 
   const handleNoteBodyDown = (noteId, stepIndex, e) => {
@@ -420,8 +597,229 @@ export default function App() {
     setDragAction({ type: 'resize', notes: [noteId], startStep: stepIndex });
   };
 
+  const exportToMidi = () => {
+    const { activeNotes, bpm } = stateRef.current;
+    const track = new MidiWriter.Track();
+    track.addEvent(new MidiWriter.TempoEvent({ bpm: bpm }));
+
+    // midi-writer-js uses ticks. Standard is 128 ticks per beat.
+    // Our grid is 16th notes (4 steps per beat). 
+    // Therefore, 1 step = 128 / 4 = 32 ticks.
+    const TICKS_PER_STEP = 32;
+
+    const events = [];
+
+    // Parse our dictionary into an array of events
+    Object.entries(activeNotes).forEach(([key, durationSteps]) => {
+      const [noteId, stepIndexStr] = key.split('-');
+      const stepIndex = parseInt(stepIndexStr);
+      
+      // Note IDs are like "C4", "F#5". We can pass these directly to midi-writer!
+      events.push(new MidiWriter.NoteEvent({
+        pitch: [noteId],
+        duration: `T${durationSteps * TICKS_PER_STEP}`,
+        startTick: stepIndex * TICKS_PER_STEP,
+        velocity: 80 // Default medium velocity
+      }));
+    });
+
+    track.addEvent(events);
+
+    const write = new MidiWriter.Writer(track);
+    const dataUri = write.dataUri();
+    
+    // Trigger Download
+    const link = document.createElement('a');
+    link.href = dataUri;
+    link.download = 'melody-maker-export.mid';
+    link.click();
+  };
+
+  const exportToWav = async () => {
+    const { activeNotes, bpm, waveform } = stateRef.current;
+    
+    // 1. Calculate total song length
+    let maxStep = 0;
+    Object.entries(activeNotes).forEach(([key, duration]) => {
+      const step = parseInt(key.split('-')[1]);
+      if (step + duration > maxStep) maxStep = step + duration;
+    });
+
+    if (maxStep === 0) return alert("Nothing to export!");
+
+    const stepTimeSecs = (60 / bpm) / 4;
+    const tailSeconds = 2; // Allow final note reverb/release to fade
+    const totalDurationSecs = (maxStep * stepTimeSecs) + tailSeconds;
+
+    // 2. Setup Offline Context (44.1kHz, 1 channel mono for this synth)
+    const sampleRate = 44100;
+    const offlineCtx = new OfflineAudioContext(1, sampleRate * totalDurationSecs, sampleRate);
+
+    // 3. Schedule all notes onto the offline context
+    Object.entries(activeNotes).forEach(([key, durationSteps]) => {
+      const [noteId, stepIndexStr] = key.split('-');
+      const stepIndex = parseInt(stepIndexStr);
+      
+      const noteObj = ALL_NOTES.find(n => n.id === noteId);
+      if (!noteObj) return;
+
+      const startTime = stepIndex * stepTimeSecs;
+      const durationSecs = durationSteps * stepTimeSecs;
+
+      // Replicate the exact synth envelope from playOscillator()
+      const osc = offlineCtx.createOscillator();
+      const noteGain = offlineCtx.createGain();
+      
+      osc.type = waveform;
+      osc.frequency.value = noteObj.freq;
+      
+      const attack = 0.01;
+      const release = 0.1;
+      const sustainTime = Math.max(0, durationSecs - attack);
+      
+      noteGain.gain.setValueAtTime(0, startTime);
+      noteGain.gain.linearRampToValueAtTime(0.3, startTime + attack);
+      noteGain.gain.setValueAtTime(0.3, startTime + attack + sustainTime);
+      noteGain.gain.exponentialRampToValueAtTime(0.001, startTime + attack + sustainTime + release);
+      
+      osc.connect(noteGain);
+      noteGain.connect(offlineCtx.destination);
+      
+      osc.start(startTime);
+      osc.stop(startTime + durationSecs + release + 0.1);
+    });
+
+    // 4. Render the audio as fast as possible
+    const renderedBuffer = await offlineCtx.startRendering();
+
+    // 5. Convert AudioBuffer to WAV format (Standard PCM encode)
+    const wavBlob = audioBufferToWav(renderedBuffer);
+    
+    // 6. Trigger Download
+    const url = URL.createObjectURL(wavBlob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'melody-maker-bounce.wav';
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Helper function to write standard WAV headers
+  const audioBufferToWav = (buffer) => {
+    const numChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const format = 1; // PCM
+    const bitDepth = 16;
+    
+    const result = new Float32Array(buffer.length * numChannels);
+    for (let channel = 0; channel < numChannels; channel++) {
+      const channelData = buffer.getChannelData(channel);
+      for (let i = 0; i < buffer.length; i++) {
+        result[i * numChannels + channel] = channelData[i];
+      }
+    }
+
+    const dataLength = result.length * (bitDepth / 8);
+    const arrayBuffer = new ArrayBuffer(44 + dataLength);
+    const view = new DataView(arrayBuffer);
+
+    const writeString = (view, offset, string) => {
+      for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+      }
+    };
+
+    writeString(view, 0, 'RIFF');
+    view.setUint32(4, 36 + dataLength, true);
+    writeString(view, 8, 'WAVE');
+    writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, format, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * numChannels * (bitDepth / 8), true);
+    view.setUint16(32, numChannels * (bitDepth / 8), true);
+    view.setUint16(34, bitDepth, true);
+    writeString(view, 36, 'data');
+    view.setUint32(40, dataLength, true);
+
+    // Write PCM samples
+    let offset = 44;
+    for (let i = 0; i < result.length; i++, offset += 2) {
+      let s = Math.max(-1, Math.min(1, result[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    }
+
+    return new Blob([view], { type: 'audio/wav' });
+  };
+
+  // --- Live Chord Detection ---
+  const currentChord = useMemo(() => {
+    const playingNotes = Object.entries(activeNotes)
+      .filter(([key, duration]) => {
+        const stepIndex = parseInt(key.split('-').pop(), 10);
+        return visualStep >= stepIndex && visualStep < stepIndex + duration;
+      })
+      .map(([key]) => {
+        const parts = key.split('-');
+        const nId = parts.slice(0, parts.length - 1).join('-'); 
+        return ALL_NOTES.find(n => n.id === nId);
+      })
+      .filter(Boolean);
+
+    if (playingNotes.length === 0) return null;
+    if (playingNotes.length === 1) return playingNotes[0].baseName;
+
+    const sortedNotes = [...playingNotes].sort((a, b) => a.midi - b.midi);
+    const bassMidi = sortedNotes[0].midi;
+    const bassName = sortedNotes[0].baseName;
+    const pitchClasses = [...new Set(sortedNotes.map(n => n.midi % 12))];
+
+    if (pitchClasses.length === 1) return bassName;
+
+    for (let i = 0; i < pitchClasses.length; i++) {
+      const rootPc = pitchClasses[i];
+      const intervals = pitchClasses.map(pc => (pc - rootPc + 12) % 12).sort((a, b) => a - b);
+      const intervalStr = intervals.join(',');
+
+      if (CHORD_DICTIONARY[intervalStr] !== undefined) {
+        const rootNote = sortedNotes.find(n => n.midi % 12 === rootPc);
+        const rootName = rootNote ? rootNote.baseName : BASE_NOTES[rootPc];
+        const suffix = CHORD_DICTIONARY[intervalStr];
+        return rootPc === (bassMidi % 12) ? `${rootName}${suffix}` : `${rootName}${suffix}/${bassName}`;
+      }
+    }
+
+    return `${bassName}(?)`; // Unrecognized chord shape
+  }, [activeNotes, visualStep]);
+
   return (
-    <div className="flex flex-col h-screen bg-gray-950 text-gray-200 font-sans select-none overflow-hidden">
+    <div className="flex flex-col h-screen bg-gray-950 text-gray-200 font-sans select-none overflow-hidden relative">
+      
+      {/* Custom Confirmation Modal */}
+      {showClearConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-gray-900 border border-gray-700 p-6 rounded-lg shadow-2xl max-w-sm w-full mx-4">
+            <h3 className="text-lg font-bold text-white mb-2">Clear All Notes?</h3>
+            <p className="text-gray-400 text-sm mb-6">Are you sure you want to completely clear the grid? This action cannot be undone.</p>
+            <div className="flex justify-end gap-3">
+              <button 
+                onClick={() => setShowClearConfirm(false)}
+                className="px-4 py-2 text-sm text-gray-300 hover:text-white transition-colors focus:outline-none"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={confirmClear}
+                className="px-4 py-2 text-sm bg-red-600/80 hover:bg-red-600 text-white rounded transition-colors font-medium focus:outline-none focus:ring-2 focus:ring-red-500/50"
+              >
+                Clear Grid
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header & Controls */}
       <header className="flex items-center justify-between px-6 py-4 bg-gray-900 border-b border-gray-800 shrink-0">
         <div className="flex items-center gap-2">
@@ -526,6 +924,19 @@ export default function App() {
               <Trash2 className="w-4 h-4" />
               Clear
             </button>
+            <button 
+  onClick={exportToMidi}
+  className="flex items-center gap-2 px-3 py-1 bg-purple-500/20 text-purple-400 rounded hover:bg-purple-500/30 transition-colors"
+>
+  <Download size={16} /> MIDI
+</button>
+
+<button 
+  onClick={exportToWav}
+  className="flex items-center gap-2 px-3 py-1 bg-pink-500/20 text-pink-400 rounded hover:bg-pink-500/30 transition-colors"
+>
+  <Waves size={16} /> Bounce WAV
+</button>
           </div>
         </div>
       </header>
@@ -577,6 +988,19 @@ export default function App() {
         </div>
         
         <div className="w-px h-5 bg-gray-700 mx-2"></div>
+        
+        <div className="flex items-center gap-2">
+          <select 
+            value=""
+            onChange={insertProgression}
+            className="bg-indigo-900/30 border border-indigo-500/50 hover:bg-indigo-900/50 transition-colors rounded px-2 py-1 focus:outline-none focus:border-indigo-400 text-indigo-200 font-medium cursor-pointer"
+          >
+            <option value="" disabled>➕ Insert Progression...</option>
+            {Object.keys(PROGRESSIONS).map(p => <option key={p} value={p}>{p}</option>)}
+          </select>
+        </div>
+
+        <div className="w-px h-5 bg-gray-700 mx-2"></div>
 
         <button
           onClick={() => setHeatmapEnabled(!heatmapEnabled)}
@@ -588,6 +1012,26 @@ export default function App() {
         >
           {heatmapEnabled ? '🔥 Heatmap: ON' : 'Heatmap: OFF'}
         </button>
+
+        <button
+          onClick={() => setAiAssistEnabled(!aiAssistEnabled)}
+          className={`flex items-center gap-2 px-3 py-1 rounded text-xs font-semibold transition-colors ${
+            aiAssistEnabled 
+              ? 'bg-fuchsia-500/20 text-fuchsia-400 border border-fuchsia-500/50' 
+              : 'bg-gray-800 text-gray-500 border border-gray-700 hover:bg-gray-700 hover:text-gray-300'
+          }`}
+        >
+          {aiAssistEnabled ? '✨ AI Assist: ON' : 'AI Assist: OFF'}
+        </button>
+        
+        <div className="w-px h-5 bg-gray-700 mx-2"></div>
+
+        <div className="flex items-center gap-2 bg-slate-900 border border-slate-700 px-3 py-1 rounded shadow-inner" title="Live Chord Detection">
+          <span className="text-slate-400 text-[10px] uppercase font-bold tracking-widest">Live Chord:</span>
+          <span className="text-indigo-300 font-bold min-w-[3rem] text-center text-sm">
+            {currentChord || '---'}
+          </span>
+        </div>
         
         <div className="ml-auto text-xs flex items-center gap-4 text-gray-400">
           {heatmapEnabled ? (
@@ -618,6 +1062,12 @@ export default function App() {
             const inScale = scaleNotes.includes(note.baseName);
             const isRoot = note.baseName === selectedKey;
             
+            // Calculate scale degree relative to root
+            const rootIndex = BASE_NOTES.indexOf(selectedKey);
+            const noteIndex = BASE_NOTES.indexOf(note.baseName);
+            const interval = (noteIndex - rootIndex + 12) % 12;
+            const roman = INTERVAL_ROMANS[interval];
+            
             return (
               <div 
                 key={`key-${note.id}`} 
@@ -630,7 +1080,15 @@ export default function App() {
                 {note.baseName === 'C' && (
                   <span className="absolute left-1 text-[10px] font-bold opacity-50">C{note.octave}</span>
                 )}
-                <span className={`font-medium ${isRoot ? 'text-indigo-600' : ''}`}>{note.name}</span>
+                
+                <div className="flex items-center gap-1.5">
+                  {inScale && (
+                    <span className={`text-[9px] font-bold ${isRoot ? 'text-indigo-500' : 'text-current opacity-40'}`}>
+                      {roman}
+                    </span>
+                  )}
+                  <span className={`font-medium w-5 text-right ${isRoot ? 'text-indigo-600' : ''}`}>{note.name}</span>
+                </div>
               </div>
             );
           })}
@@ -694,6 +1152,32 @@ export default function App() {
                       />
                     );
                   })}
+
+                  {/* AI Suggested Ghost Notes */}
+                  {suggestedNotes.filter(s => s.id === note.id).map(sugg => (
+                    <div
+                      key={`sugg-${sugg.id}-${sugg.stepIndex}`}
+                      onPointerDown={(e) => handleSuggestionClick(sugg, e)}
+                      className="absolute top-0 h-full p-[2px] cursor-pointer z-10 group"
+                      style={{ 
+                        left: `${sugg.stepIndex * 40}px`, 
+                        width: `${sugg.duration * 40}px` 
+                      }}
+                    >
+                      <div className={`w-full h-full rounded-sm border border-dashed flex items-center justify-center px-1 transition-all
+                        ${sugg.type === 'smooth' 
+                          ? 'bg-teal-500/10 border-teal-500/50 hover:bg-teal-500/30' 
+                          : 'bg-fuchsia-500/10 border-fuchsia-500/50 hover:bg-fuchsia-500/30'
+                        }
+                      `}>
+                        <span className={`text-[9px] font-bold pointer-events-none select-none drop-shadow-md truncate
+                          ${sugg.type === 'smooth' ? 'text-teal-300/80' : 'text-fuchsia-300/80'}
+                        `}>
+                          {sugg.label}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
 
                   {/* Foreground Active Notes (Clickable to REMOVE) */}
                   {Array.from({ length: numSteps }).map((_, stepIndex) => {

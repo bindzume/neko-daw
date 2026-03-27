@@ -2004,7 +2004,14 @@ const stopPlayback = () => {
                   // Normal click: seek playhead
                   setCurrentStep(stepIndex);
                   currentAudioStepRef.current = stepIndex;
-                  nextNoteTimeRef.current = 0;
+                  // Reset audio clock to "now" so the scheduler picks up
+                  // from the current time instead of trying to catch up
+                  // from time=0 (which causes a runaway loop).
+                  if (audioCtxRef.current) {
+                    nextNoteTimeRef.current = audioCtxRef.current.currentTime + 0.05;
+                  } else {
+                    nextNoteTimeRef.current = 0;
+                  }
                   if (playheadRef.current) playheadRef.current.style.left = `${stepIndex * 40}px`;
                   if (headerHighlightRef.current) headerHighlightRef.current.style.left = `${stepIndex * 40}px`;
                 }

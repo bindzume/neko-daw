@@ -1,16 +1,21 @@
-# React + Vite
+![neko](https://files.catbox.moe/xapvbw.png)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+# Neko-daw
 
-Currently, two official plugins are available:
+Web-DAW with features to make music creation easy even for the musically challenged.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- Built in view of which notes are in key and in scales.
+- Heatmap to see if a note is syncopated, on an upbeat, or on a downbeat
+- Automatically add basic chord progressions
+- Auto-saving feature to your browser's local storage
+- Import and Export tunes
+- Export to midi or WAV
 
-## React Compiler
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Additional help
 
-## Expanding the ESLint configuration
+To mark the end of the song, hold alt (or option key if itoddler) and click on the seekbar. 
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+To loop a section, hold down shift on the seekbar and drag. 
+
+  
